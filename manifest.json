@@ -1,18 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Disney Watch Party (Hunty)",
-  "version": "1.0.0",
-  "description": "Watch Disney+ in sync with someone far away. Free, no account.",
+  "version": "2.0.0",
+  "description": "Watch Disney+ in sync with friends far away. Free, no account.",
   "permissions": [],
+  "action": {
+    "default_title": "Disney Watch Party",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  },
   "content_scripts": [
     {
       "matches": ["*://*.disneyplus.com/*"],
-      "js": ["peerjs.min.js", "content.js"],
+      "js": ["peerjs.min.js", "src/state.js", "src/net.js", "src/sync.js", "src/ui.js", "src/main.js"],
       "css": ["panel.css"],
       "run_at": "document_idle"
     }
   ],
-  "icons": {
-    "128": "icon.png"
-  }
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
 }
