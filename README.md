@@ -1,4 +1,4 @@
-# Disney Watch Party (Hunty)
+# Disney Watch Party (v3) (Hunty)
 
 A free Chrome extension that keeps Disney+ in sync between two or more people in different places. Play, pause and seek happen for everyone, and there is a chat sidebar with emoji reactions. No account, no server of ours.
 
@@ -41,7 +41,12 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 - `src/sync.js`: player control, drift fixes, ad handling.
 - `src/ui.js`: side panel, chat, reactions.
 - `src/main.js`: startup and session restore.
-- `panel.css`: side panel styling.
+- `panel.css`: styles for the small in-page pill and the reaction floats
 - `popup.html`, `popup.js`: toolbar popup.
 - `icon.svg`, `icon16.png`, `icon48.png`, `icon128.png`: icons.
 - `tests/run.mjs`, `tests/test.html`, `tests/test.mp4`: end-to-end tests (`node tests/run.mjs`).
+
+## v3 notes (2026-10-10)
+- Sync runs on Disney+'s own player clock (program position in ms) through the page's player API, not the raw video element. Skips land anywhere in the title, not just inside the buffer.
+- Chat lives in Chrome's side panel: click the toolbar icon, or the small "Chat" pill at the bottom right of the video. The video is never covered or cropped.
+- Ads: when anyone hits an ad, everyone else pauses and the panel shows who the room is waiting on. When the last ad ends, everyone resumes together at the same spot.

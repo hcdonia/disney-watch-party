@@ -5,18 +5,24 @@
   h1{font-size:17px;margin:0 0 10px}
   ol{margin:0 0 14px;padding-left:20px;color:#d6d9e3}
   li{margin-bottom:6px}
-  button{width:100%;padding:10px;border:0;border-radius:8px;background:#0072d2;color:#f9f9f9;font-size:14px;font-weight:600;cursor:pointer}
+  button{display:block;width:100%;padding:10px;border:0;border-radius:8px;background:#0072d2;color:#f9f9f9;font-size:14px;font-weight:600;cursor:pointer}
   button:hover{background:#1a86e6}
+  button.secondary{margin-top:8px;background:#2c3142}
+  button.secondary:hover{background:#3a4056}
+  .err{margin-top:8px;font-size:12px;color:#f87171}
+  .err:empty{display:none}
   .v{margin-top:10px;text-align:center;font-size:11px;color:#8a8fa3}
 </style></head>
 <body>
   <h1>Disney Watch Party</h1>
   <ol>
     <li>Open Disney+ and pick something to watch.</li>
-    <li>In the side panel, enter your name and start a party, or enter a friend's code to join.</li>
+    <li>Open the chat panel, enter your name, and start a party, or enter a friend's code to join.</li>
     <li>Share the 4-letter code. Everyone stays in sync and can chat.</li>
   </ol>
-  <button id="open">Open Disney+</button>
+  <button id="chat" type="button">Open chat</button>
+  <button id="open" class="secondary" type="button">Open Disney+</button>
+  <div class="err" id="err" role="alert"></div>
   <div class="v" id="ver"></div>
   <script src="popup.js"></script>
 </body></html>

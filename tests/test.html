@@ -4,11 +4,34 @@
 <style>body{background:#000;color:#fff;font-family:sans-serif}</style></head>
 <body>
 <video class="btm-media-client-element" style="width:0;height:0"></video>
-<video id="v" src="test.mp4" muted style="width:640px;height:360px"></video>
-<div id="adflag" hidden>Ad 1 of 2</div>
+<video id="v" src="test.mp4" muted loop autoplay style="width:640px;height:360px"></video>
+<script>
+window.chrome = { runtime: {
+  connect: () => ({ postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }),
+  sendMessage: () => {}, getURL: (p) => p, onMessage: { addListener() {} } } };
+window.__hwpEvents = [];
+</script>
+<script src="fake-player.js"></script>
 <script src="../peerjs.min.js"></script>
 <script src="../src/state.js"></script>
+<script>
+(() => {
+  const rec = ['sync:event', 'sync:ad', 'sync:waiting', 'net:status', 'net:roster', 'net:message', 'player:state'];
+  const orig = HWP.bus.emit.bind(HWP.bus);
+  HWP.bus.emit = (name, ...args) => {
+    if (rec.includes(name)) {
+      const e = { name, payload: args[0], at: Date.now() };
+      if (name === 'player:state') { const i = window.__hwpEvents.findIndex((x) => x.name === name); if (i >= 0) window.__hwpEvents.splice(i, 1); }
+      window.__hwpEvents.push(e);
+      if (window.__hwpEvents.length > 500) window.__hwpEvents.splice(0, 100);
+    }
+    return orig(name, ...args);
+  };
+})();
+</script>
 <script src="../src/net.js"></script>
+<script src="../src/bridge.js"></script>
+<script src="../src/player.js"></script>
 <script src="../src/sync.js"></script>
 <script src="../src/ui.js"></script>
 <script src="../src/main.js"></script>

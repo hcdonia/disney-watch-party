@@ -1,36 +1,64 @@
-// Video sync: finds the real Disney+ <video>, mirrors play/pause/seek across the party,
-// runs the host heartbeat (tick), compensates for network delay, sits out ad breaks,
-// and follows the host to the same title. Talks to other modules only via HWP.net.send,
-// HWP.bus and HWP.state (see PLAN.md).
+// Disney Watch Party: sync (PLAN.md v3 "Sync"). Program-ms model.
+//
+// Every position here is Disney+ PROGRAM time in milliseconds from HWP.player (the player's own
+// timeline.info.playheadPositionMs). <video>.currentTime is NOT program time on Disney+ (it resets on
+// ads and reloads, and its duration is the buffered edge), so this file never touches <video>.
+//
+// What it does:
+// - Spots local play / pause / seek by comparing consecutive player:state samples, and sends them.
+// - Applies remote play / pause / seek, with latency compensation.
+// - Host heartbeat: `tick` every 4s; `sync` on request. Guests correct drift > 1500ms from it.
+// - ROOM WAITS: while anyone is in an ad, everyone else pauses; when the last ad ends the host sends
+//   `play {ms}` and the room resumes together. Someone in an ad ignores play/pause/seek until it ends,
+//   then asks the host for a `sync`.
+// - Follows the host to the same title (`url` on sync/tick).
+//
+// Messages (all positions are program ms): play {ms, url}, pause {ms, url}, seek {ms, playing, url},
+// sync / tick {ms, playing, ad, adLeftMs, url}, ad {on, leftMs}, sync-request.
+// Bus out: sync:event {kind, by, ms, time}, sync:ad {on, who, leftMs}, sync:waiting {names}.
 (() => {
   const H = window.HWP;
   if (!H || H.sync) return;
   const S = H.state;
 
-  const TICK_MS = 4000, PICK_MS = 1000, AD_MS = 500;
-  const DRIFT = 1.5, PAUSE_DRIFT = 0.3, SEEK_MIN = 0.5; // seconds of disagreement we tolerate
-  const EXPECT_MS = 1500;        // a play/pause we asked for should fire its event within this long
-  const ATTACH_GRACE_MS = 1500;  // guests only: a freshly attached video fires autoplay/resume events nobody asked for
-  const ACTION_WIN_MS = 2000;    // after a play/pause/seek, ignore host ticks that were already in flight
-  const REFUSE_MS = 8000;        // a refused seek means "ad playing" for this long
+  const TICK_MS = 4000;           // host heartbeat
+  const TOL_MS = 1500;            // disagreement we tolerate before seeking
+  const SEEK_JUMP_MS = 3000;      // playhead moved this much more (or less) than the wall clock explains => a seek
+  const OWN_FLIP_MS = 1500;       // a play/pause we issued shows up within this long...
+  const OWN_FLIP_SETTLE_MS = 8000;// ...or, if the player was busy seeking/buffering, at the first settled state within this long
+  const OWN_SEEK_MS = 8000;       // a seek we issued lands within this long...
+  const OWN_SEEK_NEAR_MS = 2000;  // ...and within this far of where we asked
+  const ACTION_WIN_MS = 2000;     // after a play/pause/seek, ignore host sync/ticks that were already in flight
+  const GRACE_MS = 3000;          // guests: Disney+ autoplay / resume right after load is not a person
+  const INPUT_MS = 1000;          // ...unless there was a real click / keypress this recently
+  const LATENCY_MAX_MS = 5000;    // clocks differ between machines; cap the one-way delay we trust
+  const AD_REFRESH_MS = 10000;    // while in an ad, re-announce it (keeps others' wait alive, updates time left)
+  const AD_STALE_MS = 35000;      // a member's ad with no news for this long is forgotten (crashed tab)
   const NAV_GUARD_MS = 10000, NAV_KEY = 'hwp-nav';
-  const AD_STUCK_MS = 4 * 60 * 1000; // ad UI "visible" this long = a false positive; stop trusting the DOM
-  const OWN_UI = '#hwp-panel, [id^="hwp-"]';
 
-  let cur = null, started = false, timers = [], unsubs = [];
-  let graceUntil = 0, actionAt = 0, lastInput = 0;
-  const expected = { play: [], pause: [] }; // timestamps of play/pause events we caused and haven't seen yet
-  let selfSeek = null;            // { t, until }: the seek we caused, so its 'seeked' is not re-broadcast
-  let sample = null, seekFrom = null; // last known position, to spot tiny player-internal seeks
-  let adMode = false, domAdSince = 0, domAdOffUntil = 0, refusedUntil = 0, probed = false;
-  let lastRemote = null;          // guest: last host sync/tick { base, paused, rate, at }
-  let lastUrl = location.href, syncTimer = null, lastStatus = null, lastPeers = 0;
+  let started = false, timers = [], unsubs = [];
+  // Local-event detection
+  let prev = null;                // previous player sample (any status)
+  let settled = null;             // last sample whose status was PLAYING or PAUSED: { playing, at }
+  let graceUntil = 0, lastInput = 0, actionAt = 0;
+  let syncAskedAt = 0;             // guest: when we last sent sync-request
+  // Ads / room waits
+  let localAd = false, adRefreshAt = 0;
+  const memberAds = new Map();    // name -> { leftMs, at } for members currently in an ad (never self)
+  let waiting = [];               // names the room is waiting on (excluding self)
+  let waitPaused = false;         // we already paused (or decided not to) for the current wait
+  let roomBusy = false;           // anyone in the room (incl. self) in an ad
+  let resumeAfter = false;        // host: room was playing when it got busy => resume when it clears
+  // Misc
+  let syncTimer = null, lastUrl = location.href, lastPath = location.pathname, lastNetState = null, lastPeers = 0;
 
   const now = () => Date.now();
   const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
-  const okRate = (r) => (typeof r === 'number' && r >= 0.25 && r <= 4 ? r : 1);
+  const num = (x) => { if (x == null || x === '') return null; const n = Number(x); return Number.isFinite(n) ? n : null; }; // Number(null) is 0: guard it
+  const P = () => H.player || null;
+  const ready = () => { const p = P(); return !!(p && p.ready()); };
 
-  // ---------- Sending ----------
+  // ---------- sending ----------
   function send(msg) {
     const n = H.net;
     if (!n || typeof n.send !== 'function') return;
@@ -40,254 +68,195 @@
     } catch (e) { H.log('sync: send failed', e); }
   }
 
-  function sendState(type) {
-    const v = cur;
-    if (!v || adMode) return; // no video = nothing true to report (time 0 would rewind everyone)
-    const msg = { type, time: v.currentTime, paused: v.paused, url: location.href };
-    if (type === 'sync' || type === 'tick') msg.rate = v.playbackRate || 1;
-    send(msg);
+  function stateMsg(type) {
+    const p = P();
+    if (!ready()) return null; // no player = nothing true to report (ms 0 would rewind everyone)
+    const ms = p.ms();
+    if (ms == null) return null;
+    // Sent during our own ad too (ad: true, playhead frozen at the break) so late joiners know to wait.
+    return { type, ms: Math.round(ms), playing: p.playing(), ad: localAd, adLeftMs: localAd ? p.adLeftMs() : null, url: location.href };
   }
-
+  function sendState(type) { const m = stateMsg(type); if (m) send(m); }
   // Host only. Debounced so hello + roster + sync-request bursts produce one sync.
   function sendSyncSoon() {
     if (S.role !== 'host') return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => sendState('sync'), 250);
   }
-  function requestSync() { if (S.role === 'guest' && !adMode) send({ type: 'sync-request' }); }
+  function requestSync() { if (S.role === 'guest' && !localAd) { syncAskedAt = now(); send({ type: 'sync-request' }); } }
+  function tickLoop() { if (S.role === 'host') sendState('tick'); }
 
-  // ---------- Touching the video quietly ----------
-  // Exact bookkeeping instead of a blanket quiet window: each video change we make should produce
-  // exactly one matching event, and only that one is swallowed. A person pausing 300ms after a
-  // remote seek is still a real pause.
-  function expect(kind) { expected[kind].push(now()); }
-  function consumeExpected(kind) {
-    const t = now();
-    expected[kind] = expected[kind].filter((at) => t - at < EXPECT_MS);
-    if (!expected[kind].length) return false;
-    expected[kind].shift();
-    return true;
-  }
-  function doPlay(v) {
-    if (!v.paused) return;
-    expect('play');
-    const p = v.play();
-    // Can be refused by autoplay policy right after a follow-the-host reload (no user gesture yet).
-    if (p && p.catch) p.catch((e) => { expected.play.shift(); H.log('sync: play() blocked', e && e.name); });
-  }
-  function doPause(v) { if (!v.paused) { expect('pause'); v.pause(); } }
-
-  function seekTo(v, t) {
-    if (isFinite(v.duration) && v.duration > 1) t = Math.min(t, v.duration - 0.5);
-    t = Math.max(0, t);
-    selfSeek = { t, until: now() + 5000 };
-    const wasPlaying = !v.paused, rate = v.playbackRate || 1, at = now();
-    try { v.currentTime = t; } catch (_) { return; }
-    // Disney+ refuses seeks during an ad (position snaps back). currentTime reads the new
-    // value immediately on a normal seek, so still being >2s off after 400ms means "ad".
-    setTimeout(() => {
-      if (v !== cur) return;
-      const expect = t + (wasPlaying && !v.paused ? ((now() - at) / 1000) * rate : 0);
-      if (Math.abs(v.currentTime - expect) > 2) {
-        refusedUntil = now() + REFUSE_MS;
-        probed = false;
-        setAdMode(true);
-      }
-    }, 400);
-  }
-  function seekIfFar(v, t, tol) { if (t != null && Math.abs(v.currentTime - t) > tol) seekTo(v, t); }
-
-  // B2: where the sender's video is *now*. Playing => add the one-way delay (clamped 0..5s
-  // because the two machines' clocks are not perfectly in agreement).
-  function remoteTarget(msg) {
-    const t = Number(msg.time);
-    if (!isFinite(t)) return null;
-    if (msg.paused !== false || typeof msg.sentAt !== 'number') return Math.max(0, t);
-    return Math.max(0, t + clamp((now() - msg.sentAt) / 1000, 0, 5) * okRate(msg.rate));
+  // ---------- local events -> party ----------
+  // PLAYING / PAUSED are settled; SEEKING / BUFFERING / LOADING are in transition (decide later).
+  function settledPlaying(s) {
+    if (s.status === 'PLAYING') return true;
+    if (s.status === 'PAUSED') return false;
+    if (!s.status) return s.playing; // unknown player build: trust the flag
+    return null;
   }
 
-  // ---------- Local events -> party ----------
-  function takeSample() {
-    const v = cur;
-    if (v && !v.seeking) sample = { t: v.currentTime, at: now(), playing: !v.paused, rate: v.playbackRate || 1 };
+  // Did we cause this play/pause? `prevSettledAt` = when the last settled sample before this one arrived.
+  function ownFlip(kind, t, prevSettledAt) {
+    const p = P(), c = p && p.lastCmds[kind];
+    if (!c) return false;
+    const age = t - c.at;
+    if (age <= OWN_FLIP_MS) return true;
+    // First settled state since our command (the player went SEEKING/BUFFERING in between).
+    return age <= OWN_FLIP_SETTLE_MS && prevSettledAt <= c.at + 300;
+  }
+  function ownSeek(ms, t) {
+    const p = P(), c = p && p.lastCmds.seek;
+    return !!c && t - c.at <= OWN_SEEK_MS && Math.abs(ms - c.ms) <= OWN_SEEK_NEAR_MS;
   }
 
-  function onLocal(kind) {
-    const t = now();
-    if (!cur || !S.role || adMode) return;
-    // The host's actions are the truth, so they always go out. A guest's first events after attach are
-    // usually Disney+ autoplaying / resuming, which must not drag the whole party.
-    // Only play/seek (autoplay, resume-where-you-left-off); a pause is never automatic. And anything
-    // right after a real click/keypress is a person, so it always goes out.
-    if (S.role === 'guest' && t < graceUntil && kind !== 'pause' && t - lastInput > 1000) return;
-    if (S.role === 'guest' && S.controlMode === 'host') {
-      requestSync(); // host is in charge: snap back to the host right away instead of on the next tick
+  function resetBaseline() { prev = null; settled = null; }
+
+  function detect(s, t) {
+    if (s.ad || s.ms == null) return; // in an ad: the playhead is frozen and nothing a person does counts
+    const sp = settledPlaying(s);
+    if (!settled) {
+      // First settled sample after (re)attach: just the baseline. Then line up with the room.
+      if (sp == null) return;
+      settled = { playing: sp, at: t };
+      if (S.role === 'guest') { graceUntil = t + GRACE_MS; requestSync(); }
+      else if (S.role === 'host') sendSyncSoon();
       return;
     }
-    actionAt = t;
-    sendState(kind);
-  }
-
-  const handlers = {
-    play() { takeSample(); if (!consumeExpected('play')) onLocal('play'); },
-    pause() { takeSample(); if (!consumeExpected('pause')) onLocal('pause'); },
-    seeking() {
-      if (seekFrom == null && sample) {
-        seekFrom = sample.t + (sample.playing ? ((now() - sample.at) / 1000) * sample.rate : 0);
-      }
-    },
-    seeked() {
-      const v = cur, from = seekFrom, mine = selfSeek && now() < selfSeek.until && Math.abs(v.currentTime - selfSeek.t) < 2;
-      seekFrom = null; selfSeek = null;
-      takeSample();
-      if (mine) return;
-      // Sub-second jumps are the player skipping buffer gaps, not a person scrubbing.
-      if (from != null && Math.abs(v.currentTime - from) < 1) return;
-      onLocal('seek');
-    },
-  };
-
-  // ---------- Picking the real <video> (B1) ----------
-  // Disney+ keeps a dummy <video class="btm-media-client-element"> (readyState 0, 0x0) next to the
-  // real one (video.hive-video). Prefer visible + loaded, largest area wins; keep the current on ties.
-  function pickVideo() {
-    const shown = Array.from(document.querySelectorAll('video')).filter((v) => v.offsetWidth > 0 && v.offsetHeight > 0);
-    const ready = shown.filter((v) => v.readyState > 0);
-    let best = null, area = -1;
-    for (const v of (ready.length ? ready : shown)) {
-      const a = v.offsetWidth * v.offsetHeight;
-      if (a > area || (a === area && v === cur)) { best = v; area = a; }
+    // Seek: compare with the previous sample. Expected movement only while it was really PLAYING
+    // (BUFFERING / SEEKING / paused don't move the playhead). Not across an ad (prev.ad): the
+    // playhead jumps when a queued seek lands after the ad, and that is handled by the ad-end sync.
+    let seek = false;
+    if (prev && !prev.ad && prev.ms != null) {
+      const expected = prev.status === 'PLAYING' ? t - prev.at : 0;
+      seek = Math.abs(s.ms - prev.ms - expected) > SEEK_JUMP_MS && !ownSeek(s.ms, t);
     }
-    return best;
-  }
-
-  function attach(v) {
-    detach();
-    cur = v;
-    for (const k in handlers) v.addEventListener(k, handlers[k]);
-    graceUntil = now() + ATTACH_GRACE_MS;
-    sample = seekFrom = selfSeek = null;
-    takeSample();
-    H.log('sync: attached', v.id || v.className || 'video');
-    if (S.role === 'host') sendSyncSoon(); else requestSync();
-  }
-  function detach() {
-    if (!cur) return;
-    for (const k in handlers) cur.removeEventListener(k, handlers[k]);
-    cur = null;
-  }
-
-  function pickLoop() {
-    const v = pickVideo();
-    if (v && v !== cur) attach(v); // SPA navigation swaps the element; re-attach
-    else if (!v && cur && !cur.isConnected) detach();
-    if (location.href !== lastUrl) { lastUrl = location.href; sendSyncSoon(); }
-  }
-  function tickLoop() { if (S.role === 'host' && cur && !adMode) sendState('tick'); }
-
-  // ---------- Ad guard (B3) ----------
-  // Case-sensitive "Ad" so "AD" (audio description) and "Ad-free" don't count.
-  const AD_TEXT = [/^Ad(?=$|[\s·•|:(\d])/, /\bAd \d+ of \d+\b/i, /\bAdvertisement\b/i];
-  const AD_ATTR_SEL = '[class*="ad"],[class*="Ad"],[data-testid*="ad"],[data-testid*="Ad"]';
-  // Whole "ad" word inside a class/testid token: ad-badge, overlay__ad, isAdPlaying, AdOverlay.
-  // Not head-, load-, pad-, badge, gradient, add-button.
-  const AD_TOKEN = /(^|[-_])ad([-_]|$)|(^|[-_a-z])Ad([-_A-Z]|$)|^ad[A-Z]/;
-
-  function shown(el) {
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return false;
-    for (let e = el, i = 0; e && i < 12; e = e.parentElement, i++) {
-      const cs = getComputedStyle(e);
-      if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) return false;
+    // Play / pause: settled state flipped.
+    let flip = null;
+    const prevSettledAt = settled.at;
+    if (sp != null) {
+      if (sp !== settled.playing) flip = sp ? 'play' : 'pause';
+      settled = { playing: sp, at: t };
+      if (flip && ownFlip(flip, t, prevSettledAt)) flip = null;
     }
-    return true;
+    if (seek) local('seek', s);
+    if (flip) local(flip, s);
   }
 
-  function attrAd() {
-    for (const el of document.querySelectorAll(AD_ATTR_SEL)) {
-      const names = ((el.getAttribute('class') || '') + ' ' + (el.getAttribute('data-testid') || '')).split(/\s+/);
-      if (!names.some((c) => AD_TOKEN.test(c) && !/ad-?free/i.test(c))) continue;
-      // Require text: an always-present, empty ad wrapper must not put us in ad mode forever.
-      if (!(el.textContent || '').trim() || el.closest(OWN_UI) || !shown(el)) continue;
-      return true;
-    }
-    return false;
-  }
-
-  function textAd() {
-    if (!document.body) return false;
-    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    const seen = new Set();
-    let n;
-    while ((n = w.nextNode())) {
-      if (!/ad/i.test(n.data)) continue; // cheap skip for the vast majority of text nodes
-      const el = n.parentElement;
-      if (!el || seen.has(el)) continue;
-      seen.add(el);
-      const tx = (el.textContent || '').trim();
-      if (!tx || tx.length >= 40 || !AD_TEXT.some((re) => re.test(tx))) continue;
-      if (el.closest(OWN_UI) || !shown(el)) continue;
-      return true;
-    }
-    return false;
-  }
-
-  function detectAd() {
-    const v = cur, t = now();
-    if (!v || !S.role) return false;
-    let dom = t >= domAdOffUntil && (attrAd() || textAd());
-    // Ad UI over a PAUSED video is a pause-screen ad, not an ad break: don't start ad mode for it
-    // (the party can still resume us), but don't end a real break just because someone paused mid-ad.
-    if (dom && v.paused && !adMode) dom = false;
-    if (!dom) domAdSince = 0;
-    else if (!domAdSince) domAdSince = t;
-    else if (t - domAdSince > AD_STUCK_MS) {
-      H.log('sync: ad UI stuck on for 4 min, treating it as a false positive for 10 min');
-      domAdOffUntil = t + 10 * 60 * 1000;
-      domAdSince = 0;
-      dom = false;
-    }
-    return dom || t < refusedUntil;
-  }
-
-  // Guest's best guess of the host's position right now, from the last sync/tick.
-  function hostNow() {
-    const r = lastRemote;
-    if (!r || now() - r.at > 15000) return null;
-    return r.paused ? r.base : r.base + ((now() - r.at) / 1000) * r.rate;
-  }
-
-  function adLoop() {
-    takeSample();
+  function local(kind, s) {
+    if (!S.role || localAd) return;
     const t = now();
-    // Refused-seek window over: probe once with a quiet seek before declaring the ad finished.
-    // Still refused => seekTo re-arms the 8s window, so ad mode does not flap on/off every 8s.
-    if (refusedUntil && t >= refusedUntil) {
-      const target = S.role === 'guest' ? hostNow() : null;
-      if (!probed && cur && target != null && Math.abs(cur.currentTime - target) > DRIFT) {
-        probed = true;
-        refusedUntil = t + 700;
-        seekTo(cur, target);
-      } else {
-        refusedUntil = 0;
-        probed = false;
+    if (S.role === 'guest') {
+      // A guest's player autoplays / resumes right after load. Not a person: ask the host instead.
+      if (t < graceUntil && kind !== 'pause' && t - lastInput > INPUT_MS) { H.log('sync: ignoring startup', kind); requestSync(); return; }
+      // Host is in charge: snap back to the host right away instead of on the next tick.
+      if (S.controlMode === 'host') { requestSync(); return; }
+    }
+    actionAt = t;
+    const ms = Math.round(s.ms);
+    H.log('sync: local', kind, ms);
+    if (kind === 'seek') send({ type: 'seek', ms, playing: settled ? settled.playing : !!s.playing, url: location.href });
+    else send({ type: kind, ms, url: location.href });
+  }
+
+  function onState(s) {
+    if (!s) return;
+    const t = s.at || now();
+    if (location.pathname !== lastPath) { lastPath = location.pathname; resetBaseline(); } // SPA title change
+    if (!!s.ad !== localAd) setLocalAd(!!s.ad, s.adLeftMs);
+    else if (localAd && t >= adRefreshAt) {
+      adRefreshAt = t + AD_REFRESH_MS;
+      send({ type: 'ad', on: true, leftMs: s.adLeftMs });
+    }
+    detect(s, t);
+    prev = s;
+    maybeWaitPause();
+  }
+
+  // ---------- ads + ROOM WAITS ----------
+  function setLocalAd(on, leftMs) {
+    localAd = on;
+    S.adMode = on;
+    adRefreshAt = now() + AD_REFRESH_MS;
+    const left = on ? num(leftMs) : null;
+    H.log('sync: my ad', on ? 'started' : 'ended');
+    H.bus.emit('sync:ad', { on, who: 'me', leftMs: left });
+    send({ type: 'ad', on, leftMs: left });
+    if (!on) requestSync(); // guests only: catch up with the host
+    updateRoom();
+  }
+
+  function setMemberAd(name, on, leftMs) {
+    if (typeof name !== 'string' || !name) return;
+    const was = memberAds.has(name);
+    if (on) memberAds.set(name, { leftMs: num(leftMs), at: now() });
+    else memberAds.delete(name);
+    if (was !== on) H.bus.emit('sync:ad', { on, who: name, leftMs: on ? num(leftMs) : null });
+    updateRoom();
+  }
+
+  function pruneAds(keepNames) {
+    const t = now();
+    for (const [name, a] of [...memberAds]) {
+      const gone = keepNames && !keepNames.includes(name);
+      if (gone || t - a.at > AD_STALE_MS) {
+        memberAds.delete(name);
+        H.bus.emit('sync:ad', { on: false, who: name, leftMs: null });
       }
     }
-    setAdMode(detectAd());
   }
 
-  function setAdMode(on) {
-    if (on === adMode) return;
-    adMode = on;
-    S.adMode = on;
-    H.log('sync: ad mode', on);
-    H.bus.emit('sync:ad', { on, who: 'me' });
-    send({ type: 'ad', on });
-    if (!on) { if (S.role === 'host') sendSyncSoon(); else requestSync(); }
+  function updateRoom() {
+    const names = [...memberAds.keys()];
+    if (names.join('\n') !== waiting.join('\n')) {
+      waiting = names;
+      S.waiting = names.slice();
+      H.log('sync: room waiting on', names);
+      H.bus.emit('sync:waiting', { names: names.slice() });
+    }
+    const busy = localAd || waiting.length > 0;
+    // Remember whether the room was playing before we pause anyone, so the host knows to resume it.
+    if (busy && !roomBusy) resumeAfter = localAd || (ready() && P().playing());
+    const cleared = roomBusy && !busy;
+    roomBusy = busy;
+    if (!waiting.length) waitPaused = false;
+    maybeWaitPause();
+    if (cleared && S.role === 'host') resumeRoom(); // guests wait for the host's play
   }
 
-  // ---------- Follow the host to the same title (B5) ----------
+  // Someone else is in an ad and we're not: pause once (marked as ours via HWP.player.lastCmds, so it is not
+  // broadcast). Runs again when our own ad ends while others are still in theirs. A person pressing play
+  // during the wait wins: we don't re-pause.
+  function maybeWaitPause() {
+    if (!waiting.length || localAd || waitPaused || !ready()) return;
+    waitPaused = true;
+    const p = P();
+    if (p.playing()) { H.log('sync: pausing, waiting on', waiting); p.pause(); }
+  }
+
+  // Host: the last ad in the room just ended. Everyone resumes from the host's position.
+  function resumeRoom() {
+    const p = P();
+    if (!ready()) return;
+    if (!resumeAfter && !p.playing()) return; // the room was paused before the ad: stay paused
+    if (!p.playing()) p.play();
+    actionAt = now();
+    const ms = Math.round(p.ms());
+    H.log('sync: room resumes at', ms);
+    send({ type: 'play', ms, url: location.href });
+  }
+
+  // Left the party: nobody to wait for. Never touches the player (no resume on leave).
+  function clearRoom() {
+    roomBusy = false; resumeAfter = false; waitPaused = false;
+    pruneAds([]);
+    updateRoom();
+  }
+
+  // ---------- follow the host to the same title ----------
   function titleId(path) { const m = /\/(?:play|video)\/([^/?#]+)/.exec(path || ''); return m ? m[1] : null; }
+  function urlTitle(url) { try { return titleId(new URL(url, location.href).pathname); } catch (_) { return null; } }
+  // Unknown on either side => assume same (test pages, browse pages).
+  function sameTitle(url) { const a = typeof url === 'string' ? urlTitle(url) : null, b = titleId(location.pathname); return !a || !b || a === b; }
 
   function followHost(url) {
     if (typeof url !== 'string') return false;
@@ -309,35 +278,51 @@
     return true;
   }
 
-  // ---------- Remote messages -> local video ----------
+  // ---------- remote messages -> local player ----------
+  // One-way delay, for targets that keep moving (sender was playing).
+  function latency(msg) { return typeof msg.sentAt === 'number' ? clamp(now() - msg.sentAt, 0, LATENCY_MAX_MS) : 0; }
+
+  // Guest: host heartbeat / requested sync. Drift correction.
   function applyHost(msg) {
     if (S.role !== 'guest') return; // the host is the clock; it never obeys ticks
-    const base = remoteTarget(msg);
-    if (base == null) return;
-    const paused = !!msg.paused, rate = okRate(msg.rate);
-    lastRemote = { base, paused, rate, at: now() };
+    setMemberAd(msg.from || 'Host', !!msg.ad, msg.adLeftMs); // the host's own ad state rides on every tick
     if (followHost(msg.url)) return;
-    const v = cur;
-    if (!v || adMode || now() - actionAt < ACTION_WIN_MS) return;
-    if (Math.abs((v.playbackRate || 1) - rate) > 0.01) v.playbackRate = rate;
-    if (paused) { doPause(v); seekIfFar(v, base, PAUSE_DRIFT); }
-    else { seekIfFar(v, base, DRIFT); doPlay(v); }
+    const p = P();
+    if (!ready() || localAd || waiting.length) return; // in an ad, or the room is waiting: the host's play resumes us
+    // Ticks (and syncs we asked for BEFORE the last action) may predate that action: skip them for a moment.
+    // A sync we asked for after it (host-mode snap-back, ad end) is fresh: always apply.
+    const asked = msg.type === 'sync' && syncAskedAt >= actionAt;
+    if (!asked && now() - actionAt < ACTION_WIN_MS) return;
+    const ms = num(msg.ms);
+    if (ms == null) return;
+    const target = Math.max(0, ms + (msg.playing && !msg.ad ? latency(msg) : 0));
+    if (Math.abs(target - p.ms()) > TOL_MS) { H.log('sync: drift', Math.round(target - p.ms()), 'ms, seeking'); p.seek(target); }
+    if (!!msg.playing !== p.playing()) { if (msg.playing) p.play(); else p.pause(); }
   }
 
+  // Anyone's play / pause / seek.
   function applyAction(msg) {
-    const v = cur;
-    if (!v || adMode) return;
-    if (S.role === 'host' && S.controlMode === 'host') return; // guests may not drive in host mode
-    const target = remoteTarget(msg);
-    if (target == null) return;
+    if (localAd) return;                                          // catch up via sync-request when the ad ends
+    if (S.role === 'host' && S.controlMode === 'host') return;    // guests may not drive in host mode
+    if (!sameTitle(msg.url)) return;                              // different show: the host's tick moves guests over
+    const p = P();
+    const ms = num(msg.ms);
+    if (!ready() || ms == null) return;
+    const kind = msg.type;
+    const playAfter = kind === 'play' || (kind === 'seek' && !!msg.playing);
+    const target = Math.max(0, ms + (playAfter ? latency(msg) : 0));
+    // A deliberate seek is honored a bit more tightly than play/pause drift.
+    const far = Math.abs(target - p.ms()) > (kind === 'seek' ? 1000 : TOL_MS);
     actionAt = now();
-    if (msg.type === 'play') { seekIfFar(v, target, DRIFT); doPlay(v); }
-    else if (msg.type === 'pause') { doPause(v); seekIfFar(v, target, PAUSE_DRIFT); }
-    else {
-      seekIfFar(v, target, SEEK_MIN); // tiny threshold also kills any seek echo ping-pong
-      if (msg.paused) doPause(v); else doPlay(v);
+    if (kind === 'pause') {
+      if (p.playing()) p.pause();
+      if (far) p.seek(target);
+    } else {
+      if (far) p.seek(target);
+      if (playAfter && !p.playing()) p.play();
+      else if (!playAfter && p.playing()) p.pause();
     }
-    H.bus.emit('sync:event', { kind: msg.type, by: msg.from || 'Someone', time: Number(msg.time) || 0 });
+    H.bus.emit('sync:event', { kind, by: msg.from || 'Someone', ms, time: ms / 1000 });
   }
 
   function onMessage(msg) {
@@ -345,9 +330,9 @@
     switch (msg.type) {
       case 'play': case 'pause': case 'seek': return applyAction(msg);
       case 'sync': case 'tick': return applyHost(msg);
+      case 'ad': return setMemberAd(msg.from || 'Someone', !!msg.on, msg.leftMs);
       case 'sync-request': return sendSyncSoon(); // no-op unless we are the host
       case 'hello': return sendSyncSoon();        // a guest just (re)joined
-      case 'ad': H.bus.emit('sync:ad', { on: !!msg.on, who: msg.from || 'Someone' }); return;
       default:
     }
   }
@@ -356,32 +341,58 @@
     if (!s) return;
     const peers = Number(s.peerCount) || 0;
     if (S.role === 'host' && peers > lastPeers) sendSyncSoon();
-    if (S.role === 'guest' && s.state === 'connected' && lastStatus !== 'connected') requestSync();
-    lastStatus = s.state;
+    if (S.role === 'guest' && s.state === 'connected' && lastNetState !== 'connected') requestSync();
+    if (s.state === 'idle' || s.state === 'error') clearRoom(); // left the party: nobody to wait for
+    lastNetState = s.state;
     lastPeers = peers;
   }
 
-  // ---------- Public API ----------
+  // Someone left mid-ad: stop waiting on them.
+  function onRoster(r) {
+    if (!r || !Array.isArray(r.names)) return;
+    pruneAds(r.names);
+    updateRoom();
+  }
+
+  function onGone() {
+    resetBaseline();
+    if (localAd) setLocalAd(false, null); // navigated away mid-ad: don't leave the room waiting on us
+  }
+
+  // 1s housekeeping: host announces a title change; forget stale ads.
+  function houseKeeping() {
+    if (location.href !== lastUrl) { lastUrl = location.href; sendSyncSoon(); }
+    if (memberAds.size) { pruneAds(null); updateRoom(); }
+  }
+
+  // ---------- public API ----------
   const noteInput = () => { lastInput = now(); };
   function start() {
     if (started) return;
     started = true;
     for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, noteInput, true);
-    unsubs = [H.bus.on('net:message', onMessage), H.bus.on('net:status', onStatus)];
-    timers = [setInterval(pickLoop, PICK_MS), setInterval(adLoop, AD_MS), setInterval(tickLoop, TICK_MS)];
-    pickLoop();
+    unsubs = [
+      H.bus.on('net:message', onMessage),
+      H.bus.on('net:status', onStatus),
+      H.bus.on('net:roster', onRoster),
+      H.bus.on('player:state', onState),
+      H.bus.on('player:ready', resetBaseline),
+      H.bus.on('player:gone', onGone),
+    ];
+    timers = [setInterval(tickLoop, TICK_MS), setInterval(houseKeeping, 1000)];
   }
 
   function stop() {
     if (!started) return;
     started = false;
+    if (localAd) setLocalAd(false, null);
     unsubs.forEach((off) => off());
     timers.forEach(clearInterval);
     for (const ev of ['pointerdown', 'keydown']) window.removeEventListener(ev, noteInput, true);
     unsubs = []; timers = [];
     clearTimeout(syncTimer);
-    detach();
-    setAdMode(false);
+    clearRoom();
+    resetBaseline();
   }
 
   // 62 -> "1:02", 3753 -> "1:02:33"
@@ -390,6 +401,7 @@
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(s % 60).padStart(2, '0');
     return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
   }
+  const fmtMs = (ms) => fmt((Number(ms) || 0) / 1000);
 
-  H.sync = { start, stop, video: () => cur, fmt };
+  H.sync = { start, stop, fmt, fmtMs, waiting: () => waiting.slice() };
 })();

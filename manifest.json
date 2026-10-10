@@ -1,21 +1,58 @@
 {
   "manifest_version": 3,
   "name": "Disney Watch Party (Hunty)",
-  "version": "2.0.0",
-  "description": "Watch Disney+ in sync with friends far away. Free, no account.",
-  "permissions": [],
+  "version": "3.0.0",
+  "description": "Watch Disney+ in sync with friends far away. Chat in the side panel. Free, no account.",
+  "permissions": [
+    "sidePanel"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "action": {
     "default_title": "Disney Watch Party",
-    "default_popup": "popup.html",
-    "default_icon": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "content_scripts": [
     {
-      "matches": ["*://*.disneyplus.com/*"],
-      "js": ["peerjs.min.js", "src/state.js", "src/net.js", "src/sync.js", "src/ui.js", "src/main.js"],
-      "css": ["panel.css"],
+      "matches": [
+        "*://*.disneyplus.com/*"
+      ],
+      "js": [
+        "peerjs.min.js",
+        "src/state.js",
+        "src/net.js",
+        "src/player.js",
+        "src/sync.js",
+        "src/ui.js",
+        "src/main.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/bridge.js"
+      ],
+      "matches": [
+        "*://*.disneyplus.com/*"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
 }

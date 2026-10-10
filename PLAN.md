@@ -132,3 +132,7 @@ tests/test.html gets a FAKE `<disney-web-player>` main-world shim (`tests/fake-p
 | F side panel | src/ui.js, panel.css, sidepanel.html, sidepanel.js, sidepanel.css, background.js, popup.html, popup.js | opus |
 | G tests | tests/* | sonnet |
 | foreman | manifest.json, src/main.js, PLAN.md, README.md, integration, ship | |
+
+## v3 status log
+- 2026-10-10 00:25 all three v3 lanes landed; foreman: manifest (sidePanel, background, web_accessible_resources, no popup so the toolbar icon opens the panel), removed popup.* and tests/run.v1.mjs. tests/run.mjs: ALL 17 PASS (program-ms sync, 3-party, host reload, room-waits ad flow, reactions).
+- Needs real-Chrome verification: bridge injection on disneyplus.com, sidePanel.open from the pill, ad flow with a live ad. Known limit: two people hitting the same break play their ads one after another, not together.

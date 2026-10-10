@@ -1,31 +1,38 @@
-/* Watch Party sidebar. Everything is scoped under #hwp-panel (the sidebar) or
-   #hwp-floats (the reaction layer over the video) so Disney+ CSS can't bleed in
-   and ours can't leak out. The page-narrowing rules live in a <style id="hwp-layout">
-   that src/ui.js injects only while the sidebar is open. */
+/* In-page styles only: the small status pill (#hwp-pill) and the reaction layer over the
+   video (#hwp-floats). The party UI lives in Chrome's side panel (sidepanel.css).
+   Everything is scoped under those two ids so Disney+ CSS can't bleed in and ours can't
+   leak out. Nothing here touches Disney+'s own layout. */
 
-#hwp-panel {
+#hwp-pill {
   all: initial;
-  box-sizing: border-box; /* all:initial resets it; the 1px border must stay inside 320px */
+  box-sizing: border-box;
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  right: 16px;
+  bottom: 96px; /* clear of the player's control bar */
   z-index: 2147483647;
-  width: 320px;
   display: flex;
   flex-direction: column;
-  background: #1a1d29;
+  gap: 4px;
+  max-width: 280px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid #2c3142;
+  border-radius: 18px;
+  background: rgba(26, 29, 41, 0.92);
   color: #f9f9f9;
-  border-left: 1px solid #2c3142;
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
-  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   color-scheme: dark;
   text-align: left;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.9;
+  transition: opacity 0.15s;
 }
+#hwp-pill:hover { opacity: 1; }
+#hwp-pill.hwp-fs { display: none; } /* fullscreen: only the reaction floats show */
 
-/* Light reset for every descendant: Disney+ styles button/input/div globally. */
-#hwp-panel *, #hwp-panel *::before, #hwp-panel *::after {
+#hwp-pill *, #hwp-pill *::before, #hwp-pill *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -42,41 +49,46 @@
   float: none;
   min-width: 0;
   max-width: none;
-  scrollbar-width: thin;
-  scrollbar-color: #3a4056 transparent;
 }
-#hwp-panel ::-webkit-scrollbar { width: 6px; height: 6px; }
-#hwp-panel ::-webkit-scrollbar-thumb { background: #3a4056; border-radius: 3px; }
-#hwp-panel :focus-visible { outline: 2px solid #4da3ff; outline-offset: 2px; }
+#hwp-pill :focus-visible { outline: 2px solid #4da3ff; outline-offset: 2px; }
 
-/* ---------- header (also the collapsed pill) ---------- */
-#hwp-panel .hwp-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid #2c3142;
-  cursor: pointer;
-  user-select: none;
-}
-#hwp-panel .hwp-title { flex: 1; font-size: 14px; font-weight: 700; white-space: nowrap; }
-#hwp-panel .hwp-min { font-size: 12px; color: #9aa3b8; }
-#hwp-panel .hwp-head:hover .hwp-min { color: #f9f9f9; }
-#hwp-panel .hwp-dot {
+#hwp-pill .hwp-pill-row { display: flex; align-items: center; gap: 8px; }
+#hwp-pill .hwp-dot {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #5b6275;
 }
-#hwp-panel[data-state="connected"] .hwp-dot { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.18); }
-#hwp-panel[data-state="hosting"] .hwp-dot,
-#hwp-panel[data-state="starting"] .hwp-dot,
-#hwp-panel[data-state="joining"] .hwp-dot,
-#hwp-panel[data-state="reconnecting"] .hwp-dot { background: #f5b942; }
-#hwp-panel[data-state="error"] .hwp-dot { background: #f87171; }
-#hwp-panel .hwp-badge {
+#hwp-pill[data-state="connected"] .hwp-dot { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.18); }
+#hwp-pill[data-state="hosting"] .hwp-dot,
+#hwp-pill[data-state="joining"] .hwp-dot,
+#hwp-pill[data-state="reconnecting"] .hwp-dot { background: #f5b942; }
+#hwp-pill[data-state="error"] .hwp-dot { background: #f87171; }
+
+#hwp-pill .hwp-pill-label {
+  flex: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hwp-pill .hwp-pill-chat {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: #0072d2;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+#hwp-pill .hwp-pill-chat:hover { background: #0483ee; }
+#hwp-pill .hwp-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -84,233 +96,24 @@
   height: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: #0072d2;
-  color: #fff;
+  background: #fff;
+  color: #0063b8;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1;
 }
-#hwp-panel .hwp-badge[hidden] { display: none; }
+#hwp-pill [hidden] { display: none; }
 
-/* Collapsed: a small pill bottom-right, raised above the player's control bar. */
-#hwp-panel.hwp-collapsed {
-  top: auto;
-  bottom: 96px;
-  right: 16px;
-  width: auto;
-  border: 1px solid #2c3142;
-  border-radius: 999px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-  opacity: 0.92;
-}
-#hwp-panel.hwp-collapsed:hover { opacity: 1; }
-#hwp-panel.hwp-collapsed .hwp-head { padding: 8px 14px; border-bottom: 0; }
-#hwp-panel.hwp-collapsed .hwp-title { flex: none; font-size: 13px; }
-#hwp-panel.hwp-collapsed .hwp-min,
-#hwp-panel.hwp-collapsed .hwp-body { display: none; }
-
-/* ---------- body ---------- */
-#hwp-panel .hwp-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  overflow-y: auto;
-}
-#hwp-panel .hwp-body > * { flex: none; }
-#hwp-panel .hwp-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #9aa3b8;
-}
-#hwp-panel .hwp-field { display: flex; flex-direction: column; gap: 6px; }
-#hwp-panel .hwp-row { display: flex; gap: 8px; }
-#hwp-panel .hwp-or {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  color: #6d7489;
-}
-#hwp-panel .hwp-or::before, #hwp-panel .hwp-or::after { content: ""; flex: 1; height: 1px; background: #2c3142; }
-
-/* buttons */
-#hwp-panel .hwp-btn {
-  display: block;
-  width: 100%;
-  padding: 9px 12px;
-  border-radius: 8px;
-  background: #0072d2;
-  color: #fff;
-  font-weight: 600;
-  text-align: center;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-#hwp-panel .hwp-btn:hover { background: #0483ee; }
-#hwp-panel .hwp-btn.hwp-secondary { background: #2c3142; }
-#hwp-panel .hwp-btn.hwp-secondary:hover { background: #3a4056; }
-#hwp-panel .hwp-btn.hwp-small { width: auto; padding: 5px 10px; font-size: 12px; }
-#hwp-panel .hwp-row .hwp-btn { width: auto; padding: 9px 18px; }
-#hwp-panel button:disabled { opacity: 0.45; cursor: default; }
-
-/* text inputs */
-#hwp-panel input[type="text"] {
-  display: block;
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid #2f3547;
-  border-radius: 8px;
-  background: #0e1018;
-  color: #f9f9f9;
-  transition: border-color 0.15s;
-}
-#hwp-panel input[type="text"]:focus { border-color: #0072d2; outline: 0; }
-#hwp-panel input[type="text"]:disabled { opacity: 0.5; }
-#hwp-panel input::placeholder { color: #6d7489; }
-#hwp-panel .hwp-row .hwp-codein { flex: 1; }
-#hwp-panel input.hwp-codein {
-  text-align: center;
-  text-transform: uppercase;
-  letter-spacing: 4px;
-  font-size: 15px;
-  font-weight: 700;
-}
-#hwp-panel input.hwp-codein::placeholder { letter-spacing: 2px; font-weight: 400; }
-#hwp-panel input[type="text"].hwp-shake { border-color: #f87171; animation: hwp-shake 0.4s; }
-
-/* status line */
-#hwp-panel .hwp-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: #aab2c5;
-}
-#hwp-panel .hwp-status.hwp-ok { color: #3ddc84; font-weight: 600; }
-#hwp-panel .hwp-status.hwp-bad { color: #f87171; }
-#hwp-panel .hwp-status.hwp-wait::before {
-  content: "";
-  flex: none;
-  width: 12px;
-  height: 12px;
-  border: 2px solid #3a4056;
-  border-top-color: #0072d2;
-  border-radius: 50%;
-  animation: hwp-spin 0.8s linear infinite;
-}
-#hwp-panel .hwp-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-#hwp-panel .hwp-top .hwp-status { flex: 1; }
-
-/* party code */
-#hwp-panel .hwp-codebox {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 16px 12px;
-  border: 1px solid #2c3142;
-  border-radius: 10px;
-  background: #0e1018;
-}
-#hwp-panel .hwp-code {
-  padding-left: 8px; /* balances the trailing letter-spacing so it centers */
-  font-size: 34px;
-  font-weight: 800;
-  letter-spacing: 8px;
-  line-height: 1.1;
-  user-select: all;
-}
-#hwp-panel .hwp-hint { font-size: 12px; color: #8b93a7; text-align: center; }
-#hwp-panel .hwp-codebox.hwp-compact { flex-direction: row; justify-content: space-between; padding: 8px 10px; }
-#hwp-panel .hwp-compact .hwp-code { flex: 1; font-size: 18px; letter-spacing: 4px; padding-left: 0; }
-#hwp-panel .hwp-compact .hwp-hint { display: none; }
-
-/* people + host control */
-#hwp-panel .hwp-people { display: flex; flex-direction: column; gap: 6px; }
-#hwp-panel .hwp-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 64px; overflow-y: auto; }
-#hwp-panel .hwp-person {
-  max-width: 100%;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: #262b3b;
+#hwp-pill .hwp-pill-wait,
+#hwp-pill .hwp-pill-hint {
+  padding-right: 6px;
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-#hwp-panel .hwp-person.hwp-you { background: rgba(0, 114, 210, 0.25); color: #cfe6ff; }
-#hwp-panel .hwp-note { font-size: 12px; color: #8b93a7; }
-#hwp-panel .hwp-note:empty { display: none; }
-#hwp-panel .hwp-toggle { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #d5dae6; cursor: pointer; }
-#hwp-panel .hwp-toggle input {
-  -webkit-appearance: none;
-  appearance: none;
-  position: relative;
-  flex: none;
-  width: 34px;
-  height: 20px;
-  border-radius: 10px;
-  background: #3a4056;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-#hwp-panel .hwp-toggle input::before {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 0.15s;
-}
-#hwp-panel .hwp-toggle input:checked { background: #0072d2; }
-#hwp-panel .hwp-toggle input:checked::before { transform: translateX(14px); }
-
-/* chat */
-#hwp-panel .hwp-body > .hwp-chat {
-  flex: 1 1 auto;
-  min-height: 120px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 8px 10px;
-  border: 1px solid #2c3142;
-  border-radius: 10px;
-  background: #0e1018;
-  overflow-wrap: anywhere;
-}
-#hwp-panel .hwp-chat:empty::before { content: "Messages and play/pause updates show up here."; color: #6d7489; font-style: italic; font-size: 12px; }
-#hwp-panel .hwp-line + .hwp-line { margin-top: 7px; }
-#hwp-panel .hwp-meta { display: flex; align-items: baseline; gap: 6px; }
-#hwp-panel .hwp-who { max-width: 190px; font-weight: 700; color: #8ab4f8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#hwp-panel .hwp-me .hwp-who { color: #3ddc84; }
-#hwp-panel .hwp-time { font-size: 11px; color: #6d7489; }
-#hwp-panel .hwp-text { color: #f1f3f8; white-space: pre-wrap; }
-#hwp-panel .hwp-sys { font-size: 12px; font-style: italic; color: #8b93a7; }
-
-/* reactions */
-#hwp-panel .hwp-reactions { display: flex; gap: 4px; }
-#hwp-panel .hwp-react {
-  flex: 1;
-  padding: 6px 0;
-  border-radius: 8px;
-  background: #262b3b;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
-  font-size: 18px;
-  line-height: 1;
-  text-align: center;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.1s;
-}
-#hwp-panel .hwp-react:hover:not(:disabled) { background: #323850; transform: translateY(-2px); }
-#hwp-panel .hwp-react:active:not(:disabled) { transform: scale(0.92); }
+#hwp-pill .hwp-pill-wait { color: #f5b942; }
+#hwp-pill .hwp-pill-hint { color: #aab2c5; white-space: normal; }
 
 /* ---------- floating reactions over the video ---------- */
 #hwp-floats {
@@ -366,15 +169,8 @@
   15%, 70% { opacity: 1; }
   100% { opacity: 0; }
 }
-@keyframes hwp-spin { to { transform: rotate(360deg); } }
-@keyframes hwp-shake {
-  20%, 60% { transform: translateX(-5px); }
-  40%, 80% { transform: translateX(5px); }
-}
 
 @media (prefers-reduced-motion: reduce) {
   #hwp-floats .hwp-float { animation-name: hwp-fade; }
-  #hwp-panel input[type="text"].hwp-shake,
-  #hwp-panel .hwp-status.hwp-wait::before { animation: none; }
-  #hwp-panel *, #hwp-panel *::before { transition: none !important; }
+  #hwp-pill, #hwp-pill * { transition: none !important; }
 }

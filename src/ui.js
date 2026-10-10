@@ -1,35 +1,57 @@
-// Sidebar UI: name/host/join flow, party code, people, chat, reactions, host control toggle.
-// Talks to the other modules only through HWP.net.*, HWP.bus events and HWP.state (see PLAN.md).
-// User-supplied text (names, chat) is only ever written with textContent, never innerHTML.
+// In-page UI (PLAN.md v3 "UI"). The party UI itself lives in Chrome's side panel
+// (sidepanel.html); this file is the page half:
+//   1. a port ('hwp-page') to background.js, which relays to the side panel bound to this tab:
+//      bus events go out as {type:'event'}, chat/system lines as {type:'line'}, view state as
+//      {type:'state'}, and a full {type:'snapshot'} answers the panel's {type:'hello'}.
+//      Panel commands (set-name, host, join, leave, chat, reaction, control) come back in.
+//   2. the chat log (source of truth, so a reopened panel keeps its history; survives a reload
+//      of the same party via sessionStorage),
+//   3. a small status pill bottom-right (dot, code, Chat button, unread badge, ad-wait line),
+//   4. reaction floats over the video.
+// Nothing here resizes or restyles Disney+'s own layout. User text is only ever set with textContent.
 (() => {
-  const SIDEBAR_PX = 320;
+  if (!window.HWP || HWP.ui) return;
+
   const MAX_LINES = 300;
   const EMOJIS = ['😂', '❤️', '😭', '🔥', '👀', '🍿'];
   const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I lookalikes
-  const LAYOUT_CSS = `
-    html, body, #root, #dplus-app-element, [class*="video_view"], [class*="hudson-contain"],
-    [class*="player-container-root"], .mini-player-bounds, draggable-surface, .mini-player-inner,
-    .btm-media-player, .btm-media-clients, .media-element-container, video.hive-video {
-      width: calc(100vw - ${SIDEBAR_PX}px) !important;
-      max-width: calc(100vw - ${SIDEBAR_PX}px) !important;
-    }`;
+  const PING_MS = 20000;            // keeps the MV3 service worker (and so the relay) alive
+  const LOG_KEY = 'hwp-log';
+  // net:message types the panel cares about (ticks/play/pause/seek stay in the page).
+  const FWD_MESSAGES = new Set(['chat', 'reaction', 'control', 'welcome', 'roster', 'end']);
+  // Bus events forwarded verbatim to the panel.
+  const FWD_EVENTS = ['net:status', 'net:roster', 'sync:event', 'sync:ad', 'sync:waiting', 'player:ready', 'player:gone'];
 
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
   };
+  const sess = {
+    get(k) { try { return JSON.parse(sessionStorage.getItem(k) || 'null'); } catch (_) { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (_) {} },
+    del(k) { try { sessionStorage.removeItem(k); } catch (_) {} },
+  };
 
-  const el = {};               // persistent nodes, re-mounted into .hwp-body per view
-  let panel, body, layoutStyle, floats;
-  let view = { state: 'idle' }; // last status rendered
-  let roster = [];             // names of the others in the room (net:roster)
-  let rosterPrimed = false;    // guests: the first roster is "who's here", not a stream of "X joined"
-  let hostName = '';           // learned from the host's welcome message
+  // ---------- state ----------
+  let inited = false;
+  let port = null, portDead = false, retryMs = 1000, retryTimer = null;
+  let orphaned = false;            // the extension was reloaded/removed under this tab: chat needs a reload
+  let panelCount = 0;              // side panels currently bound to this tab (from background.js)
+  let status = { state: 'idle', peerCount: 0 };
+  let log = [], nextId = 1, saveTimer = null;
   let unread = 0;
-  let pinned = true;           // chat follows new lines unless the user scrolled up
-  let layoutOpen = null;       // is the page currently narrowed for the sidebar
+  let roster = [];                 // names of the others (net:roster)
+  let rosterPrimed = false;        // guests: the first roster is "who's here", not a stream of "X joined"
+  let hostName = '';               // learned from the host's welcome
+  let waiting = [];                // sync:waiting names (whose ad the room is waiting on)
+  let adMe = false;                // an ad is on my screen
+  let playerReady = null;          // player:ready / player:gone, null = not reported yet
   let lastReactAt = 0;
+  let hintTimer = null;
+  const el = {};
+  let floats = null;
 
+  // ---------- helpers ----------
   // Tiny element builder. Props go to DOM properties when they exist, else attributes. Never parses HTML.
   function h(tag, props, ...kids) {
     const n = document.createElement(tag);
@@ -42,323 +64,283 @@
     return n;
   }
   const cleanName = (n) => (typeof n === 'string' ? n.replace(/\s+/g, ' ').trim().slice(0, 24) : '');
-  const isHost = () => HWP.state.role === 'host' || view.state === 'hosting';
-  const isOpen = () => !panel.classList.contains('hwp-collapsed');
-  function clock(ts) {
-    const d = new Date(ts);
-    return (d.getHours() % 12 || 12) + ':' + String(d.getMinutes()).padStart(2, '0');
-  }
-  function fmt(t) {
-    try { if (HWP.sync && HWP.sync.fmt) return HWP.sync.fmt(t); } catch (_) {}
-    t = Math.max(0, Math.floor(+t || 0));
-    const s = String(t % 60).padStart(2, '0'), m = Math.floor(t / 60) % 60, hr = Math.floor(t / 3600);
-    return hr ? `${hr}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
-  }
+  const normCode = (c) => String(c == null ? '' : c).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  const inParty = () => ['connected', 'reconnecting'].includes(status.state) || (status.state === 'hosting' && roster.length > 0);
   function list(names) {
     try { return new Intl.ListFormat('en', { type: 'conjunction' }).format(names); } catch (_) { return names.join(', '); }
   }
-  function safeSend(msg) { try { HWP.net.send(msg); } catch (e) { HWP.log('send failed', e); } }
+  // Program milliseconds -> "m:ss" or "h:mm:ss".
+  function fmtMs(ms) {
+    const t = Math.max(0, Math.floor((+ms || 0) / 1000));
+    const s = String(t % 60).padStart(2, '0'), m = Math.floor(t / 60) % 60, hr = Math.floor(t / 3600);
+    return hr ? `${hr}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+  }
+  function eventMs(ev) { // v3 sends ms; tolerate the v2 seconds field
+    if (typeof ev.ms === 'number' && isFinite(ev.ms)) return ev.ms;
+    if (typeof ev.time === 'number' && isFinite(ev.time)) return ev.time * 1000;
+    return null;
+  }
+  function plain(v) { // port messages must be JSON-safe
+    try { return v === undefined ? null : JSON.parse(JSON.stringify(v)); } catch (_) { return null; }
+  }
+  function stateCopy() {
+    const out = {};
+    for (const k in HWP.state) {
+      const v = HWP.state[k];
+      if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) out[k] = v;
+      else if (Array.isArray(v)) out[k] = plain(v);
+    }
+    return out;
+  }
+  const uiCopy = () => ({ hostName, waiting: waiting.slice(), adMe, unread, playerReady, panels: panelCount });
+  function safe(fn, what) { try { return fn(); } catch (e) { HWP.log(what || 'ui call failed', e); return undefined; } }
 
-  // ---------- build ----------
-  function build() {
-    el.badge = h('span', { className: 'hwp-badge', hidden: true });
-    el.min = h('span', { className: 'hwp-min', text: 'Hide' });
-    el.head = h('div', { className: 'hwp-head', tabIndex: 0, role: 'button', 'aria-expanded': 'true' },
-      h('span', { className: 'hwp-dot' }), h('span', { className: 'hwp-title', text: 'Watch Party' }), el.badge, el.min);
+  // ---------- port to background.js ----------
+  function hasRuntime() {
+    try { return typeof chrome !== 'undefined' && !!(chrome.runtime && chrome.runtime.id && chrome.runtime.connect); } catch (_) { return false; }
+  }
+  function connectPort() {
+    retryTimer = null;
+    if (port || portDead) return;
+    if (!hasRuntime()) { portDead = true; renderPill(); return; }
+    let p;
+    try { p = chrome.runtime.connect({ name: 'hwp-page' }); } catch (e) { HWP.log('connect failed', e); portDead = true; renderPill(); return; }
+    port = p;
+    p.onMessage.addListener((msg) => { retryMs = 1000; onPortMessage(msg); });
+    p.onDisconnect.addListener(() => {
+      try { void chrome.runtime.lastError; } catch (_) {}
+      if (port !== p) return;
+      port = null;
+      panelCount = 0;
+      if (!hasRuntime()) { portDead = orphaned = true; renderPill(); return; } // extension reloaded or removed
+      retryTimer = setTimeout(connectPort, retryMs); // service worker restarted: re-register
+      retryMs = Math.min(retryMs * 2, 30000);
+    });
+  }
+  function post(msg) {
+    if (!port) return false;
+    try { port.postMessage(msg); return true; } catch (e) { HWP.log('post failed', e); return false; }
+  }
+  const postState = () => post({ type: 'state', state: stateCopy(), status: plain(status), ui: uiCopy() });
+  const snapshot = () => ({ type: 'snapshot', state: stateCopy(), status: plain(status), log: plain(log.slice(-MAX_LINES)), ui: uiCopy() });
 
-    el.name = h('input', { id: 'hwp-name', type: 'text', maxLength: 24, placeholder: 'What should we call you?',
-      autocomplete: 'off', spellcheck: false, value: cleanName(store.get('hwp-name')) });
-    el.nameRow = h('label', { className: 'hwp-field' }, h('span', { className: 'hwp-label', text: 'Your name' }), el.name);
-    el.host = h('button', { id: 'hwp-host', className: 'hwp-btn', type: 'button', text: 'Start a party' });
-    el.or = h('div', { className: 'hwp-or', text: 'or join one' });
-    // maxLength is loose so a pasted " ab-12 " survives; the input handler trims it to 4 clean chars.
-    el.code = h('input', { id: 'hwp-code', className: 'hwp-codein', type: 'text', maxLength: 12, placeholder: 'CODE',
-      autocomplete: 'off', spellcheck: false });
-    el.join = h('button', { id: 'hwp-join', className: 'hwp-btn hwp-secondary', type: 'button', text: 'Join' });
-    el.joinRow = h('div', { className: 'hwp-row' }, el.code, el.join);
-
-    el.status = h('div', { className: 'hwp-status', role: 'status' });
-    el.leave = h('button', { id: 'hwp-leave', className: 'hwp-btn hwp-secondary', type: 'button', text: 'Leave' });
-    el.top = h('div', { className: 'hwp-top' });
-
-    el.codeText = h('div', { className: 'hwp-code' });
-    el.copy = h('button', { id: 'hwp-copy', className: 'hwp-btn hwp-secondary hwp-small', type: 'button', text: 'Copy' });
-    el.codeBox = h('div', { className: 'hwp-codebox' }, h('div', { className: 'hwp-label', text: 'Party code' }),
-      el.codeText, h('div', { className: 'hwp-hint', text: "Send it to whoever you're watching with" }), el.copy);
-
-    el.people = h('div', { id: 'hwp-people', className: 'hwp-people' });
-    el.note = h('div', { className: 'hwp-note' });
-    el.control = h('input', { id: 'hwp-control', type: 'checkbox', checked: true });
-    el.controlRow = h('label', { className: 'hwp-toggle' }, el.control, h('span', { text: 'Anyone can control' }));
-
-    el.chat = h('div', { id: 'hwp-chat', className: 'hwp-chat', role: 'log', 'aria-live': 'polite' });
-    el.reactions = h('div', { id: 'hwp-reactions', className: 'hwp-reactions' },
-      ...EMOJIS.map((e) => h('button', { className: 'hwp-react', type: 'button', title: 'Send ' + e, 'data-emoji': e, text: e })));
-    el.msg = h('input', { id: 'hwp-msg', className: 'hwp-msg', type: 'text', maxLength: 500, placeholder: 'Say something…',
-      autocomplete: 'off' });
-
-    body = h('div', { className: 'hwp-body' });
-    panel = h('div', { id: 'hwp-panel', role: 'complementary', 'aria-label': 'Watch Party' }, el.head, body);
-    document.documentElement.appendChild(panel);
-    layoutStyle = h('style', { id: 'hwp-layout', text: LAYOUT_CSS });
+  function onPortMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'panels') { // background: how many panels are bound to this tab
+      panelCount = Math.max(0, +msg.count || 0);
+      return;
+    }
+    command(msg);
   }
 
-  // Keys typed in the panel must never reach the Disney+ player (Space = pause, arrows = seek).
-  function isolate(node) {
-    for (const t of ['keydown', 'keyup', 'keypress']) {
-      node.addEventListener(t, (e) => {
-        e.stopPropagation();
-        if (t === 'keydown' && e.key === 'Escape' && e.target.tagName === 'INPUT') e.target.blur();
-      });
+  // Panel commands. Also exposed as HWP.ui.command for tests (no chrome.runtime on a test page).
+  function command(cmd) {
+    if (!cmd || typeof cmd !== 'object') return false;
+    switch (cmd.type) {
+      case 'hello':
+        unread = 0; renderPill();
+        post(snapshot());
+        return true;
+      case 'set-name':
+        setName(cmd.name); postState();
+        return true;
+      case 'host': {
+        if (cmd.name != null) setName(cmd.name);
+        const code = normCode(cmd.code).length === 4 ? normCode(cmd.code) : randomCode();
+        callNet(() => HWP.net.host(code));
+        return true;
+      }
+      case 'join': {
+        if (cmd.name != null) setName(cmd.name);
+        const code = normCode(cmd.code);
+        if (code.length !== 4) { postState(); return false; }
+        callNet(() => HWP.net.join(code));
+        return true;
+      }
+      case 'leave':
+        safe(() => HWP.net.leave(), 'leave failed');
+        if (status.state !== 'idle') onStatus({ state: 'idle', peerCount: 0 }); // in case net didn't emit it
+        else postState();
+        return true;
+      case 'chat': {
+        const text = typeof cmd.text === 'string' ? cmd.text.trim().slice(0, 500) : '';
+        if (!text) return false;
+        safe(() => HWP.net.send({ type: 'chat', text }), 'send failed');
+        addChat('You', text, true);
+        return true;
+      }
+      case 'reaction':
+        if (!EMOJIS.includes(cmd.emoji)) return false;
+        return react(cmd.emoji);
+      case 'control': {
+        const mode = cmd.mode;
+        if ((mode !== 'everyone' && mode !== 'host') || HWP.state.role !== 'host') { postState(); return false; }
+        if (HWP.state.controlMode === mode) { postState(); return true; }
+        HWP.state.controlMode = mode;
+        safe(() => HWP.net.send({ type: 'control', mode }), 'send failed');
+        sys(mode === 'host' ? 'Only you can play, pause or skip now' : 'Anyone can play, pause or skip now');
+        postState();
+        return true;
+      }
+      default:
+        return false;
     }
   }
 
-  function wire() {
-    [el.name, el.code, el.msg, el.control, panel].forEach(isolate);
-    el.head.addEventListener('click', () => setOpen(!isOpen()));
-    el.head.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!isOpen()); }
-    });
-    el.host.addEventListener('click', startHost);
-    el.join.addEventListener('click', startJoin);
-    el.code.addEventListener('input', () => { el.code.value = el.code.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4); });
-    el.code.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) startJoin(); });
-    el.copy.addEventListener('click', copyCode);
-    el.leave.addEventListener('click', leave);
-    el.control.addEventListener('change', () => {
-      const mode = el.control.checked ? 'everyone' : 'host';
-      HWP.state.controlMode = mode;
-      safeSend({ type: 'control', mode });
-      sys(mode === 'host' ? 'Only you can play, pause or skip now' : 'Anyone can play, pause or skip now');
-    });
-    el.reactions.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-emoji]');
-      if (b && !b.disabled) react(b.getAttribute('data-emoji'));
-    });
-    el.msg.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' || e.isComposing) return;
-      const text = el.msg.value.trim().slice(0, 500);
-      if (!text) return;
-      el.msg.value = '';
-      safeSend({ type: 'chat', text });
-      addChat('You', text, true);
-      pinned = true;
-      scrollChat();
-    });
-    el.chat.addEventListener('scroll', () => {
-      pinned = el.chat.scrollHeight - el.chat.scrollTop - el.chat.clientHeight <= 40;
-    });
-    document.addEventListener('fullscreenchange', () => { applyLayout(); if (floats) floatLayer(); });
-
-    HWP.bus.on('net:status', onStatus);
-    HWP.bus.on('net:roster', onRoster);
-    HWP.bus.on('net:message', onMessage);
-    HWP.bus.on('sync:event', onSyncEvent);
-    HWP.bus.on('sync:ad', onAd);
-  }
-
-  // ---------- open / collapse + page layout ----------
-  function setOpen(open) {
-    panel.classList.toggle('hwp-collapsed', !open);
-    el.head.setAttribute('aria-expanded', String(open));
-    store.set('hwp-collapsed', open ? '0' : '1');
-    if (open) { unread = 0; updateBadge(); if (pinned) scrollChat(); }
-    applyLayout();
-  }
-
-  // Narrow the Disney+ page so the player sits beside the sidebar, never under it.
-  function applyLayout() {
-    const open = isOpen() && !document.fullscreenElement;
-    if (open && !layoutStyle.isConnected) document.documentElement.appendChild(layoutStyle);
-    if (!open && layoutStyle.isConnected) layoutStyle.remove();
-    if (open === layoutOpen) return;
-    layoutOpen = open;
-    window.dispatchEvent(new Event('resize')); // the player measures itself on resize
-    HWP.bus.emit('ui:layout', { open });
-  }
-
-  function updateBadge() {
-    el.badge.hidden = !unread;
-    el.badge.textContent = unread > 99 ? '99+' : String(unread);
-  }
-  function bumpUnread() { if (!isOpen()) { unread++; updateBadge(); } }
-
-  // ---------- views ----------
-  function setStatus(text, cls) {
-    el.status.textContent = text;
-    el.status.className = 'hwp-status' + (cls ? ' ' + cls : '');
-  }
-
-  // Swap the body's children only when the view's node list actually changes, so a status
-  // update (someone joined) doesn't blur the chat box mid-sentence.
-  function mount(nodes) {
-    const cur = [...body.children];
-    if (cur.length === nodes.length && cur.every((n, i) => n === nodes[i])) return;
-    const focused = panel.contains(document.activeElement) ? document.activeElement : null;
-    body.replaceChildren(...nodes);
-    if (focused && focused.isConnected) focused.focus({ preventScroll: true });
-    if (pinned) scrollChat();
-  }
-
-  function render(st) {
-    view = st;
-    const s = st.state;
-    const code = st.code || HWP.state.code || '';
-    panel.dataset.state = s; // drives the header status dot
-    el.codeText.textContent = code;
-    el.leave.classList.toggle('hwp-small', s === 'connected' || s === 'reconnecting');
-    el.codeBox.classList.toggle('hwp-compact', s !== 'hosting');
-    if (s === 'starting') {
-      setStatus('Starting your party…', 'hwp-wait');
-      el.leave.textContent = 'Cancel';
-      mount([el.status, el.leave]);
-    } else if (s === 'hosting') {
-      setStatus(st.message || 'Waiting for someone to join…', 'hwp-wait'); // net's text when given ("Reclaiming your party code...")
-      el.leave.textContent = 'End party';
-      mount([el.codeBox, el.status, el.leave]);
-    } else if (s === 'joining') {
-      setStatus(st.message || 'Joining ' + code + '…', 'hwp-wait');
-      el.leave.textContent = 'Cancel';
-      mount([el.status, el.leave]);
-    } else if (s === 'connected' || s === 'reconnecting') {
-      const live = s === 'connected';
-      const count = (roster.length || st.peerCount || 0) + 1;
-      if (live) setStatus('Connected · ' + count + ' watching', 'hwp-ok');
-      else setStatus(st.message || 'Reconnecting to the party…', 'hwp-wait');
-      el.leave.textContent = isHost() ? 'End party' : 'Leave';
-      if (el.status.parentNode !== el.top) el.top.append(el.status, el.leave);
-      el.control.checked = HWP.state.controlMode !== 'host';
-      el.msg.disabled = !live;
-      el.msg.placeholder = live ? 'Say something…' : 'Reconnecting…';
-      for (const b of el.reactions.children) b.disabled = !live;
-      renderPeople();
-      mount([el.top, isHost() && el.codeBox, el.people, isHost() ? el.controlRow : el.note, el.chat, el.reactions, el.msg]
-        .filter(Boolean));
-    } else if (s === 'error') {
-      setStatus(st.message || 'Something went wrong. Try again.', 'hwp-bad');
-      el.leave.textContent = 'Back';
-      mount([el.status, el.leave]);
-    } else {
-      setStatus('Everyone needs this extension. One person starts a party, the others join with the code.');
-      mount([el.nameRow, el.host, el.or, el.joinRow, el.status]);
-    }
-  }
-
-  function renderPeople() {
-    let hostMarked = false;
-    const chips = roster.map((n) => {
-      const isTheHost = !isHost() && !hostMarked && n === hostName;
-      if (isTheHost) hostMarked = true;
-      return h('span', { className: 'hwp-person', title: n, text: n + (isTheHost ? ' (host)' : '') });
-    });
-    const me = h('span', { className: 'hwp-person hwp-you', text: 'You' + (isHost() ? ' (host)' : '') });
-    el.people.replaceChildren(h('div', { className: 'hwp-label', text: 'Watching' }), h('div', { className: 'hwp-chips' }, me, ...chips));
-    el.note.textContent = !isHost() && HWP.state.controlMode === 'host' ? 'Only the host can play, pause or skip.' : '';
-  }
-
-  // ---------- actions ----------
-  // Name is required before host/join; saved before calling net so hello/welcome carry it.
-  function takeName() {
-    const name = cleanName(el.name.value);
-    if (!name) { shake(el.name); el.name.focus(); return false; }
-    el.name.value = name;
-    store.set('hwp-name', name);
-    HWP.state.name = name;
-    return true;
-  }
-  function shake(node) {
-    node.classList.remove('hwp-shake');
-    void node.offsetWidth; // restart the CSS animation
-    node.classList.add('hwp-shake');
-    setTimeout(() => node.classList.remove('hwp-shake'), 600);
-  }
+  // net.js normally answers host/join with a net:status at once; if it throws, say so instead of hanging.
   function callNet(fn) {
     try { fn(); } catch (e) {
       HWP.log('net call failed', e);
-      onStatus({ state: 'error', message: 'Something went wrong. Try again.' });
+      onStatus({ state: 'error', message: 'Something went wrong. Try again.', peerCount: 0 });
+      return;
     }
+    postState();
   }
-  function startHost() {
-    if (!takeName()) return;
+
+  function setName(n) {
+    const name = cleanName(n);
+    if (!name) return;
+    HWP.state.name = name;
+    store.set('hwp-name', name);
+  }
+  function randomCode() {
     const rnd = crypto.getRandomValues(new Uint32Array(4));
-    const code = [...rnd].map((n) => CODE_CHARS[n % CODE_CHARS.length]).join('');
-    render({ state: 'starting' }); // instant feedback; net:status 'hosting' replaces it once the room is open
-    callNet(() => HWP.net.host(code));
-  }
-  function startJoin() {
-    if (!takeName()) return;
-    const code = el.code.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (code.length !== 4) { shake(el.code); el.code.focus(); return; }
-    render({ state: 'joining', code });
-    callNet(() => HWP.net.join(code));
-  }
-  function leave() {
-    try { HWP.net.leave(); } catch (e) { HWP.log('leave failed', e); }
-    if (view.state !== 'idle') onStatus({ state: 'idle' }); // in case net didn't emit it
-  }
-  function copyCode() {
-    const code = el.codeText.textContent;
-    const flash = (t) => {
-      el.copy.textContent = t;
-      clearTimeout(el.copy._t);
-      el.copy._t = setTimeout(() => { el.copy.textContent = 'Copy'; }, 1500);
-    };
-    const fallback = () => { // select the code so a manual copy works even if the clipboard API is blocked
-      const r = document.createRange();
-      r.selectNodeContents(el.codeText);
-      getSelection().removeAllRanges();
-      getSelection().addRange(r);
-      let ok = false;
-      try { ok = document.execCommand('copy'); } catch (_) {}
-      flash(ok ? 'Copied!' : 'Selected');
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(() => flash('Copied!'), fallback);
-    else fallback();
+    return [...rnd].map((n) => CODE_CHARS[n % CODE_CHARS.length]).join('');
   }
   function react(emoji) {
-    if (Date.now() - lastReactAt < 250) return; // light spam guard
+    if (Date.now() - lastReactAt < 250) return false; // light spam guard
     lastReactAt = Date.now();
-    safeSend({ type: 'reaction', emoji });
+    safe(() => HWP.net.send({ type: 'reaction', emoji }), 'send failed');
     floatEmoji(emoji, 'You');
+    return true;
   }
 
   // ---------- chat log ----------
-  function scrollChat() { el.chat.scrollTop = el.chat.scrollHeight; }
-  function push(line) {
-    if (line.parentNode !== el.chat) el.chat.appendChild(line);
-    while (el.chat.childElementCount > MAX_LINES) el.chat.firstElementChild.remove();
-    if (pinned) scrollChat();
+  function record(line) {
+    log.push(line);
+    if (log.length > MAX_LINES) log.splice(0, log.length - MAX_LINES);
+    post({ type: 'line', line });
+    saveLog();
   }
-  // Consecutive messages from the same person within 2 min share one name/time header.
   function addChat(who, text, mine) {
-    const now = Date.now(), key = mine ? 'me' : 'u:' + who;
-    const last = el.chat.lastElementChild;
-    let line = last && last.dataset.who === key && now - +last.dataset.at < 120000 && last.childElementCount < 20 ? last : null;
-    if (!line) {
-      line = h('div', { className: 'hwp-line' + (mine ? ' hwp-me' : '') },
-        h('div', { className: 'hwp-meta' }, h('span', { className: 'hwp-who', text: who }), h('span', { className: 'hwp-time', text: clock(now) })));
-      line.dataset.who = key;
-    }
-    line.dataset.at = now;
-    line.appendChild(h('div', { className: 'hwp-text', text }));
-    push(line);
+    record({ id: nextId++, kind: 'chat', at: Date.now(), who, text, mine: !!mine });
   }
-  // Muted system line. `merge` collapses a burst (scrubbing = many seeks) into one updating line.
+  // Muted system line. `merge` collapses a burst (scrubbing = many seeks) into one updating line:
+  // the panel replaces the line with the same id.
   function sys(text, merge) {
-    const now = Date.now(), last = el.chat.lastElementChild;
-    if (merge && last && last.dataset.merge === merge && now - +last.dataset.at < 4000) {
-      last.textContent = text;
-      last.dataset.at = now;
+    const now = Date.now(), last = log[log.length - 1];
+    if (merge && last && last.merge === merge && now - last.at < 4000) {
+      last.text = text; last.at = now;
+      post({ type: 'line', line: last });
+      saveLog();
       return;
     }
-    const line = h('div', { className: 'hwp-line hwp-sys', text });
-    line.dataset.at = now;
-    if (merge) line.dataset.merge = merge;
-    push(line);
+    const line = { id: nextId++, kind: 'sys', at: now, text };
+    if (merge) line.merge = merge;
+    record(line);
+  }
+  function saveLog() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (HWP.state.code && log.length) sess.set(LOG_KEY, { code: HWP.state.code, nextId, log });
+      else sess.del(LOG_KEY);
+    }, 400);
+  }
+  // A reload mid-party (follow-host navigation, manual refresh) keeps the conversation.
+  function restoreLog() {
+    const saved = sess.get(LOG_KEY);
+    const s = HWP.session && HWP.session.load ? safe(() => HWP.session.load()) : null;
+    if (saved && s && s.code && saved.code === s.code && Array.isArray(saved.log)) {
+      log = saved.log.filter((l) => l && typeof l === 'object' && typeof l.id === 'number').slice(-MAX_LINES);
+      nextId = Math.max(+saved.nextId || 1, ...log.map((l) => l.id + 1), 1);
+    } else sess.del(LOG_KEY);
+  }
+  function bumpUnread() {
+    if (panelCount > 0) return;
+    unread++;
+    renderPill();
+    HWP.bus.emit('ui:unread', { count: unread });
+  }
+
+  // ---------- pill ----------
+  function buildPill() {
+    el.dot = h('span', { className: 'hwp-dot' });
+    el.label = h('span', { className: 'hwp-pill-label', text: 'Watch Party' });
+    el.badge = h('span', { className: 'hwp-badge', hidden: true });
+    el.chat = h('button', { id: 'hwp-pill-chat', className: 'hwp-pill-chat', type: 'button', title: 'Open the party chat' },
+      h('span', { text: 'Chat' }), el.badge);
+    el.wait = h('div', { className: 'hwp-pill-wait', hidden: true });
+    el.hint = h('div', { className: 'hwp-pill-hint', hidden: true });
+    el.pill = h('div', { id: 'hwp-pill', role: 'region', 'aria-label': 'Watch Party' },
+      h('div', { className: 'hwp-pill-row' }, el.dot, el.label, el.chat), el.wait, el.hint);
+    el.pill.dataset.state = 'idle';
+    document.documentElement.appendChild(el.pill);
+
+    // Never take focus from the player (a focused button would eat the Space key).
+    el.pill.addEventListener('mousedown', (e) => e.preventDefault());
+    // Keys never leak to the Disney+ player (Space = pause, arrows = seek).
+    for (const t of ['keydown', 'keyup', 'keypress']) el.pill.addEventListener(t, (e) => e.stopPropagation());
+    el.pill.addEventListener('click', openPanel);
+    document.addEventListener('fullscreenchange', onFullscreen);
+  }
+
+  function pillState() {
+    const s = status.state;
+    return ['idle', 'hosting', 'joining', 'connected', 'reconnecting', 'error'].includes(s) ? s : 'idle';
+  }
+  function renderPill() {
+    if (!el.pill) return;
+    const s = pillState();
+    const code = HWP.state.code || status.code || '';
+    const host = HWP.state.role === 'host';
+    const count = roster.length + 1;
+    el.pill.dataset.state = s;
+    let label = 'Watch Party';
+    if (s === 'hosting') label = code ? 'Party ' + code : 'Starting…';
+    else if (s === 'joining') label = 'Joining…';
+    else if (s === 'reconnecting') label = 'Reconnecting…';
+    else if (s === 'connected') label = (host && code ? code + ' · ' : '') + count + ' watching';
+    else if (s === 'error') label = 'Watch Party';
+    el.label.textContent = label;
+    el.badge.hidden = !unread;
+    el.badge.textContent = unread > 99 ? '99+' : String(unread);
+    el.chat.setAttribute('aria-label', unread ? 'Open chat, ' + unread + ' unread' : 'Open chat');
+    const w = waitText();
+    el.wait.textContent = w;
+    el.wait.hidden = !w;
+    if (orphaned && !el.hint.textContent) { el.hint.textContent = 'Reload this tab to use the chat'; el.hint.hidden = false; }
+  }
+  function waitText() {
+    if (adMe && inParty()) return 'Ad playing, the others are waiting';
+    if (waiting.length) return 'Waiting for ' + list(waiting) + "'s " + (waiting.length > 1 ? 'ads' : 'ad') + '…';
+    return '';
+  }
+  function hint(text) {
+    el.hint.textContent = text;
+    el.hint.hidden = false;
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { el.hint.textContent = ''; el.hint.hidden = true; renderPill(); }, 6000);
+  }
+  function openPanel() {
+    if (!hasRuntime()) return hint('Reload this tab to use the chat');
+    try {
+      chrome.runtime.sendMessage({ type: 'open-sidepanel' }, (res) => {
+        let err = null;
+        try { err = chrome.runtime.lastError; } catch (_) {}
+        if (err || !res || !res.ok) hint('Open the chat from the Watch Party icon in your toolbar');
+      });
+    } catch (e) {
+      HWP.log('open-sidepanel failed', e);
+      hint(hasRuntime() ? 'Open the chat from the Watch Party icon in your toolbar' : 'Reload this tab to use the chat');
+    }
+  }
+  function onFullscreen() {
+    el.pill.classList.toggle('hwp-fs', !!document.fullscreenElement);
+    if (floats) floatLayer();
   }
 
   // ---------- reactions over the video ----------
-  // Lives in <body> (or the fullscreen element, so it still shows in fullscreen), not in the panel.
+  // Lives in <body>, or inside the fullscreen element so it still shows in fullscreen.
   function floatLayer() {
     const fs = document.fullscreenElement;
     const parent = fs && fs.tagName !== 'VIDEO' ? fs : document.body || document.documentElement;
@@ -369,10 +351,9 @@
   function floatEmoji(emoji, who) {
     const layer = floatLayer();
     if (layer.childElementCount >= 24) return; // never bury the movie
-    const width = window.innerWidth - (layoutOpen ? SIDEBAR_PX : 0);
     const f = h('div', { className: 'hwp-float' },
       h('span', { className: 'hwp-float-emoji', text: emoji }), who && h('span', { className: 'hwp-float-name', text: who }));
-    f.style.left = Math.round(width * (0.1 + Math.random() * 0.75)) + 'px';
+    f.style.left = Math.round(window.innerWidth * (0.1 + Math.random() * 0.75)) + 'px';
     const done = () => f.remove();
     f.addEventListener('animationend', done);
     setTimeout(done, 2000); // fallback if animations never run
@@ -384,22 +365,25 @@
     roster = [];
     rosterPrimed = false;
     hostName = '';
+    waiting = [];
     HWP.state.controlMode = 'everyone';
-    el.chat.replaceChildren();
-    pinned = true;
+    log = [];
+    sess.del(LOG_KEY);
     unread = 0;
-    updateBadge();
+    post(snapshot()); // the panel clears its chat from this
   }
 
   function onStatus(st) {
     if (!st || !st.state) return;
-    const prev = view.state;
+    const prev = status.state;
+    status = Object.assign({}, st);
     if (st.state === 'idle' && prev !== 'idle') resetParty();
     if (st.state === 'hosting') rosterPrimed = true; // host starts alone: every roster change is news
     if (st.state === 'joining' && prev !== 'joining') rosterPrimed = false;
     if (st.state === 'reconnecting' && prev !== 'reconnecting') sys('Lost the connection, reconnecting…');
     if (st.state === 'connected' && prev === 'reconnecting') sys('Back in the party');
-    render(st);
+    renderPill();
+    postState();
   }
 
   // Multiset difference so two people both named "Alex" are tracked correctly.
@@ -416,7 +400,8 @@
       for (const n of minus(roster, next)) sys(n + ' left');
     }
     roster = next;
-    render(view); // refresh people + count
+    renderPill();
+    postState();
   }
 
   function onMessage(msg) {
@@ -430,43 +415,94 @@
       bumpUnread();
     } else if (msg.type === 'control' && HWP.state.role !== 'host' && (msg.mode === 'everyone' || msg.mode === 'host')) {
       // net.js has usually applied the mode already, so don't compare; the host only sends on a change.
+      HWP.state.controlMode = msg.mode;
       sys(msg.mode === 'host'
         ? who + ' turned off shared controls. Only the host can play, pause or skip.'
         : who + ' turned on shared controls. Anyone can play, pause or skip.');
-      HWP.state.controlMode = msg.mode;
-      render(view);
+      postState();
     } else if (msg.type === 'welcome') {
       hostName = who;
       if (msg.controlMode === 'everyone' || msg.controlMode === 'host') HWP.state.controlMode = msg.controlMode;
-      render(view);
+      postState();
+    } else if (msg.type === 'end' && HWP.state.role !== 'host') {
+      sys(who + ' ended the party.');
     }
   }
 
   function onSyncEvent(ev) {
     if (!ev) return;
     const who = cleanName(ev.by) || 'Someone';
-    const at = typeof ev.time === 'number' && isFinite(ev.time) ? ' at ' + fmt(ev.time) : '';
-    if (ev.kind === 'play') sys(who + ' pressed play');
+    const ms = eventMs(ev);
+    const at = ms == null ? '' : ' at ' + fmtMs(ms);
+    if (ev.kind === 'play') sys(who + ' pressed play' + at);
     else if (ev.kind === 'pause') sys(who + ' paused' + at);
-    else if (ev.kind === 'seek') sys(who + ' skipped to ' + fmt(ev.time), 'seek:' + who);
+    else if (ev.kind === 'seek') sys(who + ' skipped to ' + (ms == null ? 'a new spot' : fmtMs(ms)), 'seek:' + who);
   }
 
+  // Someone else's ad shows up as sync:waiting (the room pauses for them); only my own is a line here.
   function onAd(ev) {
-    if (!ev) return;
-    const me = ev.who === 'me', who = me ? '' : cleanName(ev.who) || 'Someone';
-    if (ev.on) sys(me ? "An ad is playing for you. You'll catch up when it ends." : 'An ad is playing on ' + who + "'s side…");
-    else sys(me ? 'Ad over, catching up' : 'Ad over for ' + who + ', catching up');
+    if (!ev || ev.who !== 'me') return;
+    const on = !!ev.on;
+    if (on === adMe) return;
+    adMe = on;
+    if (inParty()) sys(on ? 'An ad is playing for you. The others are paused until it ends.' : 'Your ad finished, catching up', 'ad:me');
+    renderPill();
+    postState();
+  }
+
+  function onWaiting(ev) {
+    const names = (ev && Array.isArray(ev.names) ? ev.names : [])
+      .filter((n) => typeof n === 'string' && n !== 'me').map((n) => cleanName(n) || 'Someone');
+    const was = waiting;
+    waiting = names;
+    if (names.join('\n') === was.join('\n')) return;
+    if (names.length) sys('Waiting for ' + list(names) + "'s " + (names.length > 1 ? 'ads' : 'ad') + ' to finish…', 'wait');
+    else if (was.length) sys("Everyone's back, resuming", 'wait');
+    renderPill();
+    postState();
+  }
+
+  function onPlayer(ready) {
+    return () => { if (playerReady !== ready) { playerReady = ready; postState(); } };
+  }
+
+  function wire() {
+    // Forward raw events first so the panel sees them before the state/line they cause.
+    for (const name of FWD_EVENTS) {
+      HWP.bus.on(name, (payload) => post({ type: 'event', name, payload: plain(payload) }));
+    }
+    HWP.bus.on('net:message', (msg) => {
+      if (msg && FWD_MESSAGES.has(msg.type)) post({ type: 'event', name: 'net:message', payload: plain(msg) });
+    });
+    HWP.bus.on('net:status', onStatus);
+    HWP.bus.on('net:roster', onRoster);
+    HWP.bus.on('net:message', onMessage);
+    HWP.bus.on('sync:event', onSyncEvent);
+    HWP.bus.on('sync:ad', onAd);
+    HWP.bus.on('sync:waiting', onWaiting);
+    HWP.bus.on('player:ready', onPlayer(true));
+    HWP.bus.on('player:gone', onPlayer(false));
   }
 
   // ---------- init ----------
   function init() {
-    if (document.getElementById('hwp-panel')) return;
+    if (inited || document.getElementById('hwp-pill')) return;
+    inited = true;
     HWP.state.name = cleanName(store.get('hwp-name')) || HWP.state.name || '';
-    build();
+    const st = HWP.net && HWP.net.status ? safe(() => HWP.net.status()) : null;
+    if (st && st.state) status = st;
+    restoreLog();
+    buildPill();
     wire();
-    render({ state: 'idle' });
-    setOpen(store.get('hwp-collapsed') !== '1');
+    renderPill();
+    connectPort();
+    setInterval(() => { if (port) post({ type: 'ping' }); }, PING_MS);
   }
 
-  HWP.ui = { init };
+  HWP.ui = {
+    init,
+    command,                                   // same entry point the side panel uses
+    snapshot: () => plain(snapshot()),
+    unread: () => unread,
+  };
 })();
