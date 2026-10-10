@@ -1,0 +1,61 @@
+#hwp-panel {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 2147483647;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+  background: #1a1d29;
+  color: #f9f9f9;
+  border: 1px solid #3a3f52;
+  border-radius: 10px;
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  padding: 10px 12px;
+}
+#hwp-panel, #hwp-panel * { box-sizing: border-box; }
+#hwp-panel .hwp-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; margin-bottom: 8px; cursor: pointer;
+}
+#hwp-panel .hwp-head span.hwp-min { opacity: 0.6; font-weight: 400; }
+#hwp-panel.hwp-collapsed .hwp-body { display: none; }
+#hwp-panel.hwp-collapsed {
+  width: auto; top: auto; bottom: 16px; right: 16px;
+  border-radius: 10px; opacity: 0.85;
+}
+#hwp-panel .hwp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#hwp-panel button {
+  width: 100%; margin-top: 6px; padding: 7px 8px;
+  border: 0; border-radius: 6px; cursor: pointer;
+  background: #0072d2; color: #fff; font-weight: 600; font-size: 13px;
+}
+#hwp-panel button.hwp-secondary { background: #3a3f52; }
+#hwp-panel input {
+  width: 100%; margin-top: 6px; padding: 7px 8px;
+  border: 1px solid #3a3f52; border-radius: 6px;
+  background: #0d0f16; color: #fff; font-size: 15px;
+  letter-spacing: 3px; text-transform: uppercase; text-align: center;
+}
+#hwp-panel .hwp-code {
+  font-size: 26px; letter-spacing: 6px; text-align: center;
+  margin: 6px 0 2px; font-weight: 700;
+}
+#hwp-panel .hwp-status { opacity: 0.75; margin-top: 6px; font-size: 12px; }
+#hwp-panel .hwp-ok { color: #4ade80; }
+#hwp-panel .hwp-bad { color: #f87171; }
+
+#hwp-chat {
+  margin-top: 8px; flex: 1; min-height: 120px; overflow-y: auto;
+  background: #0d0f16; border: 1px solid #3a3f52; border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; word-break: break-word;
+}
+#hwp-chat .hwp-line { margin: 2px 0; }
+#hwp-chat .hwp-line b { color: #8ab4f8; font-weight: 600; }
+#hwp-chat .hwp-line.hwp-me b { color: #4ade80; }
+#hwp-panel input.hwp-msg {
+  letter-spacing: normal; text-transform: none; text-align: left; font-size: 13px;
+}
