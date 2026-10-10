@@ -87,3 +87,48 @@ peerjs.min.js  src/state.js  src/net.js  src/sync.js  src/ui.js  src/main.js
 - 2026-10-09 22:20 plan written, workers spawned.
 - 2026-10-09 23:05 all four lanes landed. Foreman fixes in sync.js: (1) attach grace was blocking every local event for 3s on both sides; now guests only, 1.5s, play/seek only, lifted after a real click/keypress; (2) blanket 800ms "ignore my own events" window replaced with exact expected-event counting so a real pause right after a remote seek still goes out. tests/run.mjs: ALL 15 PASS. content.js (v1) removed.
 - Untested on the real site: ad detection against Disney+'s actual ad UI (refused-seek fallback is the safety net), autoplay block after follow-host reload.
+
+# v3: player-native sync + side panel (2026-10-09 23:50, FOREMAN MODE)
+
+## Facts measured live on disneyplus.com (Agatha All Along, ads plan)
+
+- The page has a `<disney-web-player>` element whose main-world instance property `mediaPlayer` (same object as `document.querySelector('disney-web-player-ui').mediaPlayerApi`) is the real player API. Content scripts live in an isolated world and cannot see it; a `<script src=chrome.runtime.getURL(...)>` injected into the page can (needs `web_accessible_resources`).
+- `mediaPlayer.timeline.info.playheadPositionMs` = program position (ms). `programDurationMs` = title length (2523792 for a 42-min episode). `type: "VOD"`.
+- `video.currentTime` / `video.duration` on the `<video>` are NOT program time: duration is the buffered edge (grows 28 → 36 → 44...), currentTime resets on reloads/ads. Never sync on them again. Setting `video.currentTime` past the buffer clamps to the buffered edge (asked 600, landed 35).
+- `mediaPlayer.seek(ms)`: number, MILLISECONDS. Seeking across an unseen ad break queues the seek: the ad plays first (store shows milestone `ad-queued-seek-marker`), then it lands.
+- `mediaPlayer.play()` / `mediaPlayer.pause()` work; `mediaPlayer.playbackStatus.currentState` is PLAYING / PAUSED / SEEKING / BUFFERING...
+- Ads: `stateStore.getState().ui.milestones.data` lists breaks: `{milestoneType:'ad-video', milestoneTime: ms}` (this episode: 0, 691708, 1128208, 1590167, 1802750). DURING an ad `playheadPositionMs` is FROZEN at the break's ms while `video.currentTime` keeps advancing and status stays PLAYING. The `<ad-badge-overlay>` element has main-world props `overlayVisible` (boolean) and `localState.adBadge` (badge state; the on-screen badge reads "Ad 0:30 Learn More"); its text is in a nested shadow root. Ads are not DRM-protected (they show in screenshots); the show is black in captures.
+- `mediaPlayer.on(name, fn)` exists but event names are unknown; poll instead (250ms) or subscribe to `stateStore.subscribe`.
+- Layout: forcing CSS widths on the player crops the video (Disney+ positions it with JS from window.innerWidth); `transform: scale()` on the app root collapses it to height 0. The in-page sidebar approach is dead. Use Chrome's Side Panel (`sidePanel` permission), which shrinks the real viewport.
+- AppleScript window id ≠ CGWindowID; `swift` + CGWindowListCopyWindowInfo gets the real one for `screencapture -l`.
+
+## v3 architecture
+
+Load order (manifest): `peerjs.min.js, src/state.js, src/net.js, src/player.js, src/sync.js, src/ui.js, src/main.js`. `src/bridge.js` is NOT a content script: `src/player.js` injects it into the page (web_accessible_resources). `background.js` is the MV3 service worker (side panel open + port relay). `sidepanel.html/js/css` is the chat UI.
+
+### HWP.player (src/player.js, isolated world; src/bridge.js, main world)
+- bridge.js (main world): finds `disney-web-player`; every 250ms posts `window.postMessage({hwp:'state', ms, durMs, status, playing, ad, adLeftMs, breaks:[ms...], v: videoCurrentTime}, '*')`; `ad` = badge overlayVisible OR (status PLAYING and playhead unchanged for 1.5s while video.currentTime advanced > 1s). Listens for `{hwp:'cmd', op:'seek'|'play'|'pause', ms}` and calls mediaPlayer. Re-finds the player if the element is replaced (SPA navigation).
+- player.js (isolated): injects bridge, relays state to `HWP.bus.emit('player:state', s)`, keeps `HWP.player.last`, exposes `HWP.player = { ready(), ms(), playing(), ad(), seek(ms), play(), pause() }`.
+
+### Sync (src/sync.js) — program-ms model
+Messages (all carry `ms` program position, NOT `time`): `play {ms}`, `pause {ms}`, `seek {ms, playing}`, `sync`/`tick {ms, playing, ad, adLeftMs, url}`, `ad {on, leftMs}`, `sync-request`. Tolerance 1500ms. Latency comp: playing targets add (now - sentAt).
+ROOM WAITS: when any member reports `ad: true`, every member NOT in an ad pauses (HWP.player.pause()) and the UI shows "Waiting for <name>'s ad". When the last ad ends, the host sends `play {ms}` and everyone resumes at the same ms. Members in an ad ignore play/pause/seek until their ad ends, then `sync-request`. Guests' local play/pause/seek respect controlMode as before. Local-event detection: compare consecutive player states (playing flipped → play/pause; ms jumped > 3000 beyond elapsed → seek) and send unless it was caused by a remote command we issued in the last 1.5s.
+`sync:event {kind, by, ms}`, `sync:ad {on, who, leftMs}`, new `sync:waiting {names: string[]}` (who the room is waiting on; [] when nobody).
+`HWP.sync.fmt(seconds)` kept, add `HWP.sync.fmtMs(ms)`.
+
+### UI (src/ui.js in-page + side panel)
+- In-page (ui.js): a small pill bottom-right (status dot, "Chat" button, unread badge, "Waiting for Alex's ad…" line), reaction floats over the video, nothing that overlays the video otherwise. No layout CSS injection. Clicking "Chat" → `chrome.runtime.sendMessage({type:'open-sidepanel'})`.
+- background.js: `chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true})`; on `open-sidepanel` message → `chrome.sidePanel.open({tabId: sender.tab.id})` (works since Chrome 116 when triggered by a user gesture message); relays port messages between the side panel and the content script of the active tab (`chrome.tabs.sendMessage` / `chrome.runtime.connect` named `hwp-panel`).
+- sidepanel.html/js/css: the full party UI from v2 ui.js (name, start/join/copy code, people, control toggle, chat with system lines, reactions row, leave). It mirrors `HWP.state` + bus events it receives from the page (`net:status`, `net:message`, `net:roster`, `sync:event`, `sync:ad`, `sync:waiting`, `ui:unread`) and sends commands (`host`, `join`, `leave`, `chat`, `reaction`, `control`, `set-name`). Dark palette as before.
+- Keep DOM ids inside the side panel the same as v2 (`#hwp-name`, `#hwp-host`, `#hwp-code`, `#hwp-join`, `#hwp-chat`, `#hwp-msg`, `#hwp-reactions [data-emoji]`, `#hwp-control`, `#hwp-leave`, `.hwp-code`, `.hwp-status`, `#hwp-people`).
+
+### Tests (tests/)
+tests/test.html gets a FAKE `<disney-web-player>` main-world shim (`tests/fake-player.js`) with `mediaPlayer` {timeline.info.playheadPositionMs advancing while playing, programDurationMs 2523792, seek(ms) with optional queued ad, play(), pause(), playbackStatus.currentState} and an `<ad-badge-overlay>` with `overlayVisible`; a test hook `window.__fakeAd(onOff, leftMs)` freezes the playhead and flips the badge. Scenarios: 2-party play/pause/seek on program ms (seek to 1,300,000 ms lands for both), 3-party relay, host reload reconnect, ROOM WAITS (guest hits ad → host pauses within 2s; ad ends → both playing within 3s at same ms ±1500), reactions float. Since the side panel can't load in the page, the harness drives `HWP.net` / `HWP.state.name` directly via page.evaluate for host/join/chat, and checks bus events through a page-side recorder (`window.__hwpEvents`).
+
+## v3 lanes
+| lane | files | model |
+|---|---|---|
+| E player+sync | src/bridge.js, src/player.js, src/sync.js | opus |
+| F side panel | src/ui.js, panel.css, sidepanel.html, sidepanel.js, sidepanel.css, background.js, popup.html, popup.js | opus |
+| G tests | tests/* | sonnet |
+| foreman | manifest.json, src/main.js, PLAN.md, README.md, integration, ship | |
