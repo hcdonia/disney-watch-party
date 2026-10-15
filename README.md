@@ -12,15 +12,19 @@ A free Chrome extension that keeps Disney+ in sync between two or more people in
 ## Use
 
 1. Open Disney+ and start the show or movie. Everyone should be on the same title.
-2. A side panel appears on the right. Type your name.
+2. Click the Watch Party icon in the toolbar to open the side panel. Type your name.
 3. One person clicks **Start a party** and shares the 4-letter code.
 4. Everyone else types the code and clicks **Join**. The panel shows "Connected" when you are linked.
-5. Play, pause or seek and everyone follows. Chat in the panel, and tap an emoji reaction (😂 ❤️ 😭 🔥 👀 🍿) to float it over everyone's video.
+5. Play, pause or seek and everyone follows. Chat in the panel, send GIFs (the GIF button), react to a message (hover it, tap the smiley), or tap an emoji reaction (😂 ❤️ 😭 🔥 👀 🍿) to float it over everyone's video.
 6. The host can switch "Anyone can control" off so only the host's play, pause and seek count.
 
 ## Ads
 
-If you have the ad-supported plan, ads play at different times for different people. While an ad is on your screen the extension stops sending and ignoring commands so nobody gets yanked around. When your ad ends it asks the host where the show is and catches up.
+On the ad-supported plan, ad breaks sit at fixed spots in the show. When one person's ad starts, anyone right behind the same break keeps playing into it so their ad runs at the same time, and the room waits once (for the longest ad) instead of once per person. Anyone further away pauses and waits. When the last ad ends, everyone resumes together at the same spot.
+
+## GIFs
+
+GIF search uses Tenor. Put a Google Cloud API key with the Tenor API enabled in `config.js` (`tenorKey`). With no key the GIF button says so and everything else still works.
 
 ## Troubleshooting
 
@@ -41,12 +45,17 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 - `src/sync.js`: player control, drift fixes, ad handling.
 - `src/ui.js`: side panel, chat, reactions.
 - `src/main.js`: startup and session restore.
-- `panel.css`: styles for the small in-page pill and the reaction floats
-- `popup.html`, `popup.js`: toolbar popup.
+- `panel.css`: styles for the reaction floats over the video.
+- `sidepanel.html/js/css`, `config.js`: the side panel (party, chat, GIFs, reactions) and its Tenor key.
 - `icon.svg`, `icon16.png`, `icon48.png`, `icon128.png`: icons.
 - `tests/run.mjs`, `tests/test.html`, `tests/test.mp4`: end-to-end tests (`node tests/run.mjs`).
 
 ## v3 notes (2026-10-10)
 - Sync runs on Disney+'s own player clock (program position in ms) through the page's player API, not the raw video element. Skips land anywhere in the title, not just inside the buffer.
-- Chat lives in Chrome's side panel: click the toolbar icon, or the small "Chat" pill at the bottom right of the video. The video is never covered or cropped.
+- Chat lives in Chrome's side panel: click the toolbar icon. Nothing sits on the video except reaction floats.
 - Ads: when anyone hits an ad, everyone else pauses and the panel shows who the room is waiting on. When the last ad ends, everyone resumes together at the same spot.
+
+## v3.1 notes (2026-10-14)
+- Same-break ads overlap (see Ads above) instead of playing one after another.
+- In-page pill removed. GIF keyboard (Tenor) and per-message emoji reactions in the side panel.
+- Fixed: the host could fail to resume after a wait because it trusted a 250ms-old "playing" sample.

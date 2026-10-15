@@ -5,7 +5,9 @@
 // Port protocol (name 'hwp-panel'):
 //   out: {type:'bind', tabId}, {type:'hello'}, {type:'ping'},
 //        {type:'set-name', name}, {type:'host', name}, {type:'join', name, code}, {type:'leave'},
-//        {type:'chat', text}, {type:'reaction', emoji}, {type:'control', mode}
+//        {type:'chat', text}, {type:'gif', url, w, h}, {type:'msg-react', mid, emoji}, {type:'reaction', emoji},
+//        {type:'control', mode}
+// GIF search is Tenor (key in config.js). Only Tenor image URLs are ever rendered.
 //   in:  {type:'page-ready'|'no-page', tabId} (background), {type:'snapshot', state, status, log, ui},
 //        {type:'state', state, status, ui}, {type:'line', line}, {type:'event', name, payload}
 // User-supplied text (names, chat) is only ever written with textContent.
@@ -15,6 +17,9 @@
   const PING_MS = 20000;
   const NO_PAGE_GRACE_MS = 1500; // a reload of the bound tab drops its port for a moment
   const DISNEY_URL = 'https://www.disneyplus.com/';
+  const TENOR = 'https://tenor.googleapis.com/v2/';
+  const TENOR_KEY = (window.HWP_CONFIG && window.HWP_CONFIG.tenorKey) || '';
+  const GIF_LIMIT = 24;
 
   const panel = document.getElementById('hwp-panel');
   const body = panel.querySelector('.hwp-body');
@@ -27,6 +32,7 @@
   let pending = null;              // optimistic view after a click, until the page answers
   let pinned = true;               // chat follows new lines unless the user scrolled up
   let nameDirty = false;           // the user has typed in the name box: don't overwrite it
+  let gifOpen = false, gifTimer = null, gifSeq = 0, gifLastQ = null;
 
   // ---------- helpers ----------
   function h(tag, props, ...kids) {
@@ -38,6 +44,14 @@
     }
     n.append(...kids.filter(Boolean));
     return n;
+  }
+  function gifUrl(u) {
+    if (typeof u !== 'string' || u.length > 500) return null;
+    try {
+      const x = new URL(u);
+      if (x.protocol !== 'https:' || !(x.hostname === 'tenor.com' || x.hostname.endsWith('.tenor.com'))) return null;
+      return x.href;
+    } catch (_) { return null; }
   }
   const cleanName = (n) => (typeof n === 'string' ? n.replace(/\s+/g, ' ').trim().slice(0, 24) : '');
   const normCode = (c) => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
@@ -167,8 +181,76 @@
     el.chat = h('div', { id: 'hwp-chat', className: 'hwp-chat', role: 'log', 'aria-live': 'polite' });
     el.reactions = h('div', { id: 'hwp-reactions', className: 'hwp-reactions' },
       ...EMOJIS.map((e) => h('button', { className: 'hwp-react', type: 'button', title: 'Send ' + e, 'data-emoji': e, text: e })));
+    el.gifBtn = h('button', { id: 'hwp-gifbtn', className: 'hwp-react hwp-gifbtn', type: 'button', title: 'Send a GIF', text: 'GIF' });
+    el.reactions.appendChild(el.gifBtn);
+    el.gifQ = h('input', { id: 'hwp-gifq', className: 'hwp-msg', type: 'text', maxLength: 80, placeholder: 'Search GIFs…', autocomplete: 'off' });
+    el.gifGrid = h('div', { className: 'hwp-gifgrid' });
+    el.gifNote = h('div', { className: 'hwp-gifnote' });
+    el.gifTray = h('div', { id: 'hwp-giftray', className: 'hwp-giftray' }, el.gifQ, el.gifNote, el.gifGrid, h('div', { className: 'hwp-gifcredit', text: 'Powered by Tenor' }));
     el.msg = h('input', { id: 'hwp-msg', className: 'hwp-msg', type: 'text', maxLength: 500, placeholder: 'Say something…',
       autocomplete: 'off' });
+  }
+
+  // ---------- GIF keyboard ----------
+  function toggleGifs(open) {
+    gifOpen = open == null ? !gifOpen : !!open;
+    el.gifBtn.classList.toggle('hwp-on', gifOpen);
+    el.gifBtn.setAttribute('aria-expanded', String(gifOpen));
+    render();
+    if (gifOpen) { el.gifQ.focus(); searchGifs(el.gifQ.value, true); }
+  }
+  function gifSearchSoon() {
+    clearTimeout(gifTimer);
+    gifTimer = setTimeout(() => searchGifs(el.gifQ.value), 300);
+  }
+  async function searchGifs(q, force) {
+    q = String(q || '').trim().slice(0, 80);
+    if (!force && q === gifLastQ) return;
+    gifLastQ = q;
+    el.gifGrid.replaceChildren();
+    if (!TENOR_KEY) { el.gifNote.textContent = 'GIF search is not set up yet (missing Tenor key in config.js).'; return; }
+    el.gifNote.textContent = 'Loading…';
+    const seq = ++gifSeq;
+    const u = new URL(TENOR + (q ? 'search' : 'featured'));
+    u.searchParams.set('key', TENOR_KEY);
+    u.searchParams.set('client_key', 'disney_watch_party');
+    u.searchParams.set('limit', String(GIF_LIMIT));
+    u.searchParams.set('media_filter', 'tinygif');
+    u.searchParams.set('contentfilter', 'medium');
+    if (q) u.searchParams.set('q', q);
+    let results = [];
+    try {
+      const r = await fetch(u.toString());
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      results = Array.isArray(j.results) ? j.results : [];
+    } catch (e) {
+      if (seq !== gifSeq) return;
+      el.gifNote.textContent = 'Could not load GIFs (' + (e && e.message ? e.message : 'network') + '). Try again.';
+      return;
+    }
+    if (seq !== gifSeq) return; // a newer search is on its way
+    el.gifGrid.replaceChildren();
+    let n = 0;
+    for (const it of results) {
+      const f = it && it.media_formats && it.media_formats.tinygif;
+      const url = f && gifUrl(f.url);
+      if (!url) continue;
+      const [w, hgt] = Array.isArray(f.dims) ? f.dims : [0, 0];
+      const img = h('img', { className: 'hwp-gifpick', src: url, alt: (it.content_description || 'GIF').slice(0, 100), loading: 'lazy', draggable: false });
+      img.dataset.w = w; img.dataset.h = hgt;
+      el.gifGrid.appendChild(img);
+      n++;
+    }
+    el.gifNote.textContent = n ? '' : (q ? 'No GIFs for "' + q + '"' : 'Nothing to show right now');
+  }
+  function sendGif(img) {
+    const url = gifUrl(img.currentSrc || img.src);
+    if (!url) return;
+    if (!post({ type: 'gif', url, w: +img.dataset.w || null, h: +img.dataset.h || null })) return;
+    pinned = true;
+    toggleGifs(false);
+    el.msg.focus();
   }
 
   function wire() {
@@ -193,6 +275,16 @@
       const b = e.target.closest('[data-emoji]');
       if (b && !b.disabled) post({ type: 'reaction', emoji: b.getAttribute('data-emoji') });
     });
+    el.gifBtn.addEventListener('click', () => { if (!el.gifBtn.disabled) toggleGifs(); });
+    el.gifQ.addEventListener('input', gifSearchSoon);
+    el.gifQ.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) { clearTimeout(gifTimer); searchGifs(el.gifQ.value, true); }
+      if (e.key === 'Escape') { e.preventDefault(); toggleGifs(false); el.msg.focus(); }
+    });
+    el.gifGrid.addEventListener('click', (e) => {
+      const img = e.target.closest('img.hwp-gifpick');
+      if (img) sendGif(img);
+    });
     el.msg.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.isComposing) return;
       const text = el.msg.value.trim().slice(0, 500);
@@ -200,6 +292,15 @@
       if (!post({ type: 'chat', text })) return; // keep the text if it couldn't go out
       el.msg.value = '';
       pinned = true;
+    });
+    // Reactions on a message: the smiley opens a picker under that message; a chip toggles that emoji.
+    el.chat.addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-react]');
+      const item = e.target.closest('[data-mid]');
+      if (!item) return;
+      if (chip) { post({ type: 'msg-react', mid: item.dataset.mid, emoji: chip.dataset.react }); closePickers(); return; }
+      if (e.target.closest('.hwp-reactbtn')) { togglePicker(item); return; }
+      if (!e.target.closest('.hwp-picker')) closePickers();
     });
     el.chat.addEventListener('scroll', () => {
       pinned = el.chat.scrollHeight - el.chat.scrollTop - el.chat.clientHeight <= 40;
@@ -320,11 +421,12 @@
       el.msg.disabled = !live;
       el.msg.placeholder = live ? 'Say something…' : 'Reconnecting…';
       for (const b of el.reactions.children) b.disabled = !live;
+      if (!live && gifOpen) { gifOpen = false; el.gifBtn.classList.remove('hwp-on'); }
       renderPeople();
       const banner = bannerText();
       el.banner.textContent = banner;
       mount([el.top, isHost() && el.codeBox, el.people, isHost() ? el.controlRow : el.note, banner && el.banner,
-        el.chat, el.reactions, el.msg]);
+        el.chat, gifOpen && el.gifTray, el.reactions, el.msg]);
     } else if (s === 'error') {
       setStatus(st.message || 'Something went wrong. Try again.', 'hwp-bad');
       el.leave.textContent = 'Back';
@@ -360,6 +462,29 @@
 
   // ---------- chat ----------
   function scrollChat() { el.chat.scrollTop = el.chat.scrollHeight; }
+  function closePickers() { for (const p of el.chat.querySelectorAll('.hwp-picker')) p.remove(); }
+  function togglePicker(item) {
+    const open = item.querySelector('.hwp-picker');
+    closePickers();
+    if (open) return;
+    const pick = h('div', { className: 'hwp-picker', role: 'menu' },
+      ...EMOJIS.map((e) => h('button', { className: 'hwp-pick', type: 'button', 'data-react': e, text: e, title: 'React ' + e })));
+    item.appendChild(pick);
+    if (pinned) scrollChat();
+  }
+  // Chips under a message: "😂 2", lit when I'm one of them. Hover text lists who.
+  function renderReacts(item, line) {
+    let row = item.querySelector('.hwp-reacts');
+    const r = line.reacts && typeof line.reacts === 'object' ? line.reacts : {};
+    const keys = EMOJIS.filter((e) => Array.isArray(r[e]) && r[e].length);
+    if (!keys.length) { if (row) row.remove(); return; }
+    if (!row) { row = h('div', { className: 'hwp-reacts' }); item.appendChild(row); }
+    row.replaceChildren(...keys.map((e) => {
+      const names = r[e].map((n) => cleanName(n) || 'Someone');
+      const mine = names.includes('You');
+      return h('button', { className: 'hwp-chipr' + (mine ? ' hwp-mine' : ''), type: 'button', 'data-react': e, title: list(names), text: e + ' ' + names.length });
+    }));
+  }
   function renderLog(lines) {
     el.chat.replaceChildren();
     pinned = true;
@@ -372,9 +497,14 @@
     const id = String(line.id);
     const text = typeof line.text === 'string' ? line.text : '';
     const existing = el.chat.querySelector('[data-id="' + CSS.escape(id) + '"]');
-    if (existing) { existing.textContent = text; if (!bulk && pinned) scrollChat(); return; }
+    if (existing) {
+      if (existing.classList.contains('hwp-item')) renderReacts(existing, line); // chat/gif: only reactions change
+      else existing.textContent = text;
+      if (!bulk && pinned) scrollChat();
+      return;
+    }
     const at = +line.at || Date.now();
-    if (line.kind === 'chat') {
+    if (line.kind === 'chat' || line.kind === 'gif') {
       const who = line.mine ? 'You' : cleanName(line.who) || 'Someone';
       const key = line.mine ? 'me' : 'u:' + who;
       const last = el.chat.lastElementChild;
@@ -386,9 +516,23 @@
         el.chat.appendChild(group);
       }
       group.dataset.at = at;
-      const t = h('div', { className: 'hwp-text', text });
-      t.dataset.id = id;
-      group.appendChild(t);
+      let t;
+      if (line.kind === 'gif') {
+        const url = gifUrl(line.url);
+        if (!url) return;
+        const img = h('img', { className: 'hwp-gif', src: url, alt: 'GIF', draggable: false });
+        if (+line.w > 0 && +line.h > 0) img.style.aspectRatio = (+line.w) + ' / ' + (+line.h);
+        img.addEventListener('load', () => { if (pinned) scrollChat(); }, { once: true });
+        t = h('div', { className: 'hwp-text hwp-gifline' }, img);
+      } else t = h('div', { className: 'hwp-text', text });
+      const item = h('div', { className: 'hwp-item' }, t);
+      item.dataset.id = id;
+      if (typeof line.mid === 'string' && /^[a-z0-9]{1,20}$/.test(line.mid)) {
+        item.dataset.mid = line.mid;
+        item.appendChild(h('button', { className: 'hwp-reactbtn', type: 'button', title: 'React to this', 'aria-label': 'React to this message', text: '☺' }));
+      }
+      renderReacts(item, line);
+      group.appendChild(item);
     } else {
       const n = h('div', { className: 'hwp-line hwp-sys', text });
       n.dataset.id = id;

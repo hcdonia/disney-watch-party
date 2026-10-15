@@ -1,6 +1,5 @@
 // MV3 service worker (PLAN.md v3 "UI"). Two jobs:
-//  1. Open Chrome's side panel: from the toolbar icon (setPanelBehavior) and from the in-page
-//     pill's "Chat" button ({type:'open-sidepanel'} via runtime.sendMessage).
+//  1. Open Chrome's side panel from the toolbar icon (setPanelBehavior).
 //  2. Relay between the side panel and the Disney+ content script of the tab it is bound to.
 //     Content script: runtime.connect({name:'hwp-page'}). Side panel: runtime.connect({name:'hwp-panel'})
 //     then {type:'bind', tabId}. Page -> every panel bound to its tab; panel -> its tab's page.
@@ -32,24 +31,6 @@ function tellPage(tabId) {
   const page = pages.get(tabId);
   if (page) send(page, { type: 'panels', count: panelsFor(tabId).length });
 }
-
-// ---------- open the side panel from the page ----------
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'open-sidepanel') return false;
-  const tabId = sender && sender.tab && sender.tab.id;
-  if (typeof tabId !== 'number') { sendResponse({ ok: false, error: 'No tab' }); return false; }
-  try {
-    // Called synchronously inside the listener so the click's user gesture still counts.
-    chrome.sidePanel.open({ tabId }).then(
-      () => sendResponse({ ok: true }),
-      (e) => sendResponse({ ok: false, error: String((e && e.message) || e) }),
-    );
-  } catch (e) {
-    sendResponse({ ok: false, error: String((e && e.message) || e) });
-    return false;
-  }
-  return true; // async sendResponse
-});
 
 // ---------- port relay ----------
 chrome.runtime.onConnect.addListener((port) => {

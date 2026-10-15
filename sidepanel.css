@@ -255,6 +255,34 @@ input[type="text"].hwp-shake { border-color: var(--bad); animation: hwp-shake 0.
 .hwp-react:hover:not(:disabled) { background: var(--chip-hover); transform: translateY(-2px); }
 .hwp-react:active:not(:disabled) { transform: scale(0.92); }
 
+/* reactions on a message */
+.hwp-item { position: relative; padding-right: 26px; }
+.hwp-reactbtn { position: absolute; right: 0; top: 0; width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: var(--faint); font-size: 15px; line-height: 22px; cursor: pointer; opacity: 0; transition: opacity 0.12s; }
+.hwp-item:hover .hwp-reactbtn, .hwp-reactbtn:focus-visible { opacity: 1; }
+.hwp-reactbtn:hover { background: var(--chip); color: var(--text); }
+.hwp-reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.hwp-chipr { border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; background: var(--chip); color: var(--text); font-size: 12px; line-height: 18px; cursor: pointer; }
+.hwp-chipr:hover { background: var(--chip-hover); }
+.hwp-chipr.hwp-mine { border-color: var(--accent); background: rgba(0, 114, 210, 0.25); }
+.hwp-picker { display: flex; gap: 2px; margin-top: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); width: max-content; max-width: 100%; }
+.hwp-pick { border: 0; background: transparent; border-radius: 999px; width: 28px; height: 28px; font-size: 17px; line-height: 1; cursor: pointer; font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+.hwp-pick:hover { background: var(--chip-hover); transform: scale(1.15); }
+
+/* GIF keyboard */
+.hwp-gifbtn { font-family: inherit; font-size: 12px; font-weight: 800; letter-spacing: 0.04em; color: #f1f3f8; }
+.hwp-gifbtn.hwp-on { background: #0483ee; }
+.hwp-giftray { display: flex; flex-direction: column; gap: 6px; max-height: 46%; border: 1px solid var(--line); border-radius: 10px; background: var(--inset); padding: 8px; }
+.hwp-giftray .hwp-msg { flex: none; }
+.hwp-gifnote { font-size: 12px; color: var(--muted); font-style: italic; min-height: 0; }
+.hwp-gifnote:empty { display: none; }
+.hwp-gifgrid { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-content: start; }
+.hwp-gifgrid:empty { display: none; }
+.hwp-gifpick { width: 100%; height: 96px; object-fit: cover; border-radius: 8px; background: var(--chip); cursor: pointer; transition: transform 0.1s; }
+.hwp-gifpick:hover { transform: scale(1.03); }
+.hwp-gifcredit { font-size: 10px; color: var(--faint); text-align: right; }
+.hwp-gifline { padding-top: 2px; }
+.hwp-gif { display: block; max-width: 220px; width: 100%; height: auto; border-radius: 8px; background: var(--chip); }
+
 /* ---------- footer ---------- */
 .hwp-foot {
   flex: none;

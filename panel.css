@@ -1,121 +1,7 @@
-/* In-page styles only: the small status pill (#hwp-pill) and the reaction layer over the
-   video (#hwp-floats). The party UI lives in Chrome's side panel (sidepanel.css).
-   Everything is scoped under those two ids so Disney+ CSS can't bleed in and ours can't
+/* In-page styles only: the reaction layer over the video (#hwp-floats). The party UI lives in Chrome's side panel (sidepanel.css).
+   Everything is scoped under that id so Disney+ CSS can't bleed in and ours can't
    leak out. Nothing here touches Disney+'s own layout. */
 
-#hwp-pill {
-  all: initial;
-  box-sizing: border-box;
-  position: fixed;
-  right: 16px;
-  bottom: 96px; /* clear of the player's control bar */
-  z-index: 2147483647;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 280px;
-  padding: 6px 6px 6px 12px;
-  border: 1px solid #2c3142;
-  border-radius: 18px;
-  background: rgba(26, 29, 41, 0.92);
-  color: #f9f9f9;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-  font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  color-scheme: dark;
-  text-align: left;
-  cursor: pointer;
-  user-select: none;
-  opacity: 0.9;
-  transition: opacity 0.15s;
-}
-#hwp-pill:hover { opacity: 1; }
-#hwp-pill.hwp-fs { display: none; } /* fullscreen: only the reaction floats show */
-
-#hwp-pill *, #hwp-pill *::before, #hwp-pill *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  font: inherit;
-  color: inherit;
-  letter-spacing: normal;
-  text-transform: none;
-  text-decoration: none;
-  text-shadow: none;
-  box-shadow: none;
-  background: transparent;
-  outline: 0;
-  float: none;
-  min-width: 0;
-  max-width: none;
-}
-#hwp-pill :focus-visible { outline: 2px solid #4da3ff; outline-offset: 2px; }
-
-#hwp-pill .hwp-pill-row { display: flex; align-items: center; gap: 8px; }
-#hwp-pill .hwp-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #5b6275;
-}
-#hwp-pill[data-state="connected"] .hwp-dot { background: #3ddc84; box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.18); }
-#hwp-pill[data-state="hosting"] .hwp-dot,
-#hwp-pill[data-state="joining"] .hwp-dot,
-#hwp-pill[data-state="reconnecting"] .hwp-dot { background: #f5b942; }
-#hwp-pill[data-state="error"] .hwp-dot { background: #f87171; }
-
-#hwp-pill .hwp-pill-label {
-  flex: 1;
-  font-weight: 700;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#hwp-pill .hwp-pill-chat {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  background: #0072d2;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-#hwp-pill .hwp-pill-chat:hover { background: #0483ee; }
-#hwp-pill .hwp-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: #fff;
-  color: #0063b8;
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-}
-#hwp-pill [hidden] { display: none; }
-
-#hwp-pill .hwp-pill-wait,
-#hwp-pill .hwp-pill-hint {
-  padding-right: 6px;
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#hwp-pill .hwp-pill-wait { color: #f5b942; }
-#hwp-pill .hwp-pill-hint { color: #aab2c5; white-space: normal; }
-
-/* ---------- floating reactions over the video ---------- */
 #hwp-floats {
   all: initial;
   position: fixed;
@@ -172,5 +58,4 @@
 
 @media (prefers-reduced-motion: reduce) {
   #hwp-floats .hwp-float { animation-name: hwp-fade; }
-  #hwp-pill, #hwp-pill * { transition: none !important; }
 }

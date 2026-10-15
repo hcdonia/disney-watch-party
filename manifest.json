@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Disney Watch Party (Hunty)",
-  "version": "3.0.0",
-  "description": "Watch Disney+ in sync with friends far away. Chat in the side panel. Free, no account.",
+  "version": "3.1.0",
+  "description": "Watch Disney+ in sync with friends far away. Chat, GIFs and reactions in the side panel. Free, no account.",
   "permissions": [
     "sidePanel"
   ],
@@ -54,5 +54,8 @@
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
-  }
+  },
+  "host_permissions": [
+    "https://tenor.googleapis.com/*"
+  ]
 }

@@ -152,6 +152,60 @@ async function reactions(browser) {
   } finally { await host.close(); await guest.close(); }
 }
 
+// Both people reach the same ad break: the second one plays into it instead of pausing, so the ads
+// overlap and the room waits once (about one ad long), not twice.
+async function sameBreak(browser) {
+  const host = await newPage(browser), guest = await newPage(browser);
+  try {
+    const code = await startHost(host, 'Hunter');
+    if (!(await joinGuest(guest, 'Pal', code))) return report('6.0 connect', false);
+    const AD = 5000, BREAK = 691708;
+    const t0 = Date.now(), logs = [];
+    if (process.env.HWP_TRACE) {
+      host.on('console', (m) => { if (/sync:/.test(m.text())) logs.push(`${Date.now() - t0} HOST  ${m.text()}`); });
+      guest.on('console', (m) => { if (/sync:/.test(m.text())) logs.push(`${Date.now() - t0} GUEST ${m.text()}`); });
+    }
+    await host.evaluate(() => { window.__fakeBreakAdMs = 5000; });
+    await guest.evaluate(() => { window.__fakeBreakAdMs = 5000; });
+    await userSeek(host, BREAK - 2500);
+    await waitFor(async () => Math.abs((await ms(guest)) - (BREAK - 2500)) < 1500, 3000);
+    await userPlay(host);
+    await waitFor(() => playing(guest), 3000);
+    const inAd = (p) => p.evaluate(() => window.__fakeInAd());
+    const hostAdAt = await waitFor(() => inAd(host), 5000) ? Date.now() : 0;
+    report('6.1 host hits the break', !!hostAdAt, `hostMs=${Math.round(await ms(host))}`);
+    const both = await waitFor(async () => (await inAd(host)) && (await inAd(guest)), 3000);
+    report('6.2 guest plays into the same break (ads overlap)', both, `guestInAd=${await inAd(guest)} guestPlaying=${await playing(guest)} guestMs=${Math.round(await ms(guest))}`);
+    const tl = {};
+    const mark = (k) => { if (!tl[k]) tl[k] = Date.now() - hostAdAt; };
+    const resumed = await waitFor(async () => {
+      const ha = await inAd(host), ga = await inAd(guest), hp = await playing(host), gp = await playing(guest);
+      if (ga) mark('guestAdStart');
+      if (!ha) mark('hostAdEnd');
+      if (tl.guestAdStart && !ga) mark('guestAdEnd');
+      return !ha && !ga && hp && gp && Math.abs((await ms(host)) - (await ms(guest))) < 1500;
+    }, AD + 5000);
+    const took = Date.now() - hostAdAt;
+    if (logs.length) console.log(logs.join('\n'));
+    report('6.3 both resume together after ONE ad length', resumed && took < AD + 5000, `took=${took}ms (ad=${AD}) ${JSON.stringify(tl)} host=${Math.round(await ms(host))} guest=${Math.round(await ms(guest))}`);
+    // GIF relay: a Tenor url goes through, anything else is dropped.
+    await host.evaluate(() => HWP.ui.command({ type: 'gif', url: 'https://media.tenor.com/abc/tenor.gif', w: 220, h: 124 }));
+    await host.evaluate(() => HWP.ui.command({ type: 'gif', url: 'https://evil.example/x.gif', w: 220, h: 124 }));
+    const gotGif = await waitFor(() => gotMsg(guest, `(m) => m && m.type === 'gif' && m.url === 'https://media.tenor.com/abc/tenor.gif'`), 3000);
+    const badGif = await gotMsg(guest, `(m) => m && m.type === 'gif' && /evil/.test(m.url)`);
+    const logged = await guest.evaluate(() => HWP.ui.snapshot().log.some((l) => l.kind === 'gif' && l.who === 'Hunter'));
+    report('6.4 gif relays to guest and lands in its chat log', gotGif && logged && !badGif, `got=${gotGif} logged=${logged} bad=${badGif}`);
+    report('6.5 no in-page pill', await host.evaluate(() => !document.getElementById('hwp-pill')));
+    // Reaction on a message: guest reacts to the host's gif; the host's copy of that line gains the name.
+    const mid = await guest.evaluate(() => (HWP.ui.snapshot().log.find((l) => l.kind === 'gif' && l.who === 'Hunter') || {}).mid);
+    await guest.evaluate((m) => HWP.ui.command({ type: 'msg-react', mid: m, emoji: '\u{1F525}' }), mid);
+    const reacted = await waitFor(() => host.evaluate((m) => { const l = HWP.ui.snapshot().log.find((x) => x.mid === m); return !!(l && l.reacts && l.reacts['\u{1F525}'] && l.reacts['\u{1F525}'].includes('Pal')); }, mid), 3000);
+    await guest.evaluate((m) => HWP.ui.command({ type: 'msg-react', mid: m, emoji: '\u{1F525}' }), mid); // toggle off
+    const cleared = await waitFor(() => host.evaluate((m) => { const l = HWP.ui.snapshot().log.find((x) => x.mid === m); return !!l && !l.reacts; }, mid), 3000);
+    report('6.6 emoji reaction on a message relays and toggles off', !!mid && reacted && cleared, `mid=${mid} reacted=${reacted} cleared=${cleared}`);
+  } finally { await host.close(); await guest.close(); }
+}
+
 let browser;
 const started = Date.now();
 try {
@@ -162,6 +216,7 @@ try {
   await scenario('3 host reload', () => hostReload(browser));
   await scenario('4 room waits', () => roomWaits(browser));
   await scenario('5 reactions', () => reactions(browser));
+  await scenario('6 same break', () => sameBreak(browser));
 } finally {
   if (browser) await browser.close();
   srv.close();

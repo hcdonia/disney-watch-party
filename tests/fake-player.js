@@ -48,10 +48,24 @@
   const mount = () => { document.body.appendChild(el); document.body.appendChild(badge); };
   if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
 
+  // window.__fakeBreakAdMs = N: playing across an unseen ad break (milestone) starts an N ms ad there,
+  // playhead frozen at the break, like the real player.
+  const seenBreaks = new Set();
   let last = performance.now();
   setInterval(() => {
     const now = performance.now(), dt = now - last; last = now;
-    if (status.playing && !inAd) info.playheadPositionMs += dt;
+    if (status.playing && !inAd) {
+      const before = info.playheadPositionMs, after = before + dt;
+      const len = +window.__fakeBreakAdMs || 0;
+      const brk = len ? stateStore.getState().ui.milestones.data.map((m) => m.milestoneTime).find((b) => before < b && after >= b && !seenBreaks.has(b)) : null;
+      if (brk != null) {
+        seenBreaks.add(brk);
+        info.playheadPositionMs = brk;
+        window.__fakeAd(true, len);
+        clearTimeout(adTimer);
+        adTimer = setTimeout(() => window.__fakeAd(false), len);
+      } else info.playheadPositionMs = after;
+    }
     if (inAd && adLeft > 0) adLeft = Math.max(0, adLeft - dt);
   }, 50);
 

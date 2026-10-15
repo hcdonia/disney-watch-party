@@ -6,8 +6,8 @@
 //      Panel commands (set-name, host, join, leave, chat, reaction, control) come back in.
 //   2. the chat log (source of truth, so a reopened panel keeps its history; survives a reload
 //      of the same party via sessionStorage),
-//   3. a small status pill bottom-right (dot, code, Chat button, unread badge, ad-wait line),
-//   4. reaction floats over the video.
+//   3. reaction floats over the video.
+// There is nothing else on the page: the chat opens from the toolbar icon.
 // Nothing here resizes or restyles Disney+'s own layout. User text is only ever set with textContent.
 (() => {
   if (!window.HWP || HWP.ui) return;
@@ -18,7 +18,7 @@
   const PING_MS = 20000;            // keeps the MV3 service worker (and so the relay) alive
   const LOG_KEY = 'hwp-log';
   // net:message types the panel cares about (ticks/play/pause/seek stay in the page).
-  const FWD_MESSAGES = new Set(['chat', 'reaction', 'control', 'welcome', 'roster', 'end']);
+  const FWD_MESSAGES = new Set(['chat', 'gif', 'msg-react', 'reaction', 'control', 'welcome', 'roster', 'end']);
   // Bus events forwarded verbatim to the panel.
   const FWD_EVENTS = ['net:status', 'net:roster', 'sync:event', 'sync:ad', 'sync:waiting', 'player:ready', 'player:gone'];
 
@@ -35,7 +35,6 @@
   // ---------- state ----------
   let inited = false;
   let port = null, portDead = false, retryMs = 1000, retryTimer = null;
-  let orphaned = false;            // the extension was reloaded/removed under this tab: chat needs a reload
   let panelCount = 0;              // side panels currently bound to this tab (from background.js)
   let status = { state: 'idle', peerCount: 0 };
   let log = [], nextId = 1, saveTimer = null;
@@ -47,8 +46,6 @@
   let adMe = false;                // an ad is on my screen
   let playerReady = null;          // player:ready / player:gone, null = not reported yet
   let lastReactAt = 0;
-  let hintTimer = null;
-  const el = {};
   let floats = null;
 
   // ---------- helpers ----------
@@ -63,6 +60,19 @@
     n.append(...kids.filter(Boolean));
     return n;
   }
+  // GIFs come only from Tenor (what the panel's GIF search returns); anything else is dropped on both ends.
+  function gifUrl(u) {
+    if (typeof u !== 'string' || u.length > 500) return null;
+    try {
+      const x = new URL(u);
+      if (x.protocol !== 'https:' || !(x.hostname === 'tenor.com' || x.hostname.endsWith('.tenor.com'))) return null;
+      return x.href;
+    } catch (_) { return null; }
+  }
+  // Chat and gif messages carry a shared id (mid) so a reaction on one side finds the same line on the other.
+  const newMid = () => { const r = crypto.getRandomValues(new Uint32Array(2)); return r[0].toString(36) + r[1].toString(36); };
+  const cleanMid = (m) => (typeof m === 'string' && /^[a-z0-9]{1,20}$/.test(m) ? m : null);
+  const gifDim = (n) => { const v = Math.round(+n); return v > 0 && v <= 2000 ? v : null; };
   const cleanName = (n) => (typeof n === 'string' ? n.replace(/\s+/g, ' ').trim().slice(0, 24) : '');
   const normCode = (c) => String(c == null ? '' : c).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
   const inParty = () => ['connected', 'reconnecting'].includes(status.state) || (status.state === 'hosting' && roster.length > 0);
@@ -102,9 +112,9 @@
   function connectPort() {
     retryTimer = null;
     if (port || portDead) return;
-    if (!hasRuntime()) { portDead = true; renderPill(); return; }
+    if (!hasRuntime()) { portDead = true; return; }
     let p;
-    try { p = chrome.runtime.connect({ name: 'hwp-page' }); } catch (e) { HWP.log('connect failed', e); portDead = true; renderPill(); return; }
+    try { p = chrome.runtime.connect({ name: 'hwp-page' }); } catch (e) { HWP.log('connect failed', e); portDead = true; return; }
     port = p;
     p.onMessage.addListener((msg) => { retryMs = 1000; onPortMessage(msg); });
     p.onDisconnect.addListener(() => {
@@ -112,7 +122,7 @@
       if (port !== p) return;
       port = null;
       panelCount = 0;
-      if (!hasRuntime()) { portDead = orphaned = true; renderPill(); return; } // extension reloaded or removed
+      if (!hasRuntime()) { portDead = true; return; } // extension reloaded or removed
       retryTimer = setTimeout(connectPort, retryMs); // service worker restarted: re-register
       retryMs = Math.min(retryMs * 2, 30000);
     });
@@ -138,7 +148,7 @@
     if (!cmd || typeof cmd !== 'object') return false;
     switch (cmd.type) {
       case 'hello':
-        unread = 0; renderPill();
+        unread = 0;
         post(snapshot());
         return true;
       case 'set-name':
@@ -165,8 +175,26 @@
       case 'chat': {
         const text = typeof cmd.text === 'string' ? cmd.text.trim().slice(0, 500) : '';
         if (!text) return false;
-        safe(() => HWP.net.send({ type: 'chat', text }), 'send failed');
-        addChat('You', text, true);
+        const mid = newMid();
+        safe(() => HWP.net.send({ type: 'chat', text, mid }), 'send failed');
+        addChat('You', text, true, mid);
+        return true;
+      }
+      case 'gif': {
+        const url = gifUrl(cmd.url);
+        if (!url) return false;
+        const w = gifDim(cmd.w), hgt = gifDim(cmd.h);
+        const mid = newMid();
+        safe(() => HWP.net.send({ type: 'gif', url, w, h: hgt, mid }), 'send failed');
+        addGif('You', url, w, hgt, true, mid);
+        return true;
+      }
+      case 'msg-react': { // toggle my emoji on one message
+        const mid = cleanMid(cmd.mid);
+        if (!mid || !EMOJIS.includes(cmd.emoji)) return false;
+        const on = toggleReact(mid, cmd.emoji, 'You');
+        if (on == null) return false;
+        safe(() => HWP.net.send({ type: 'msg-react', mid, emoji: cmd.emoji, on }), 'send failed');
         return true;
       }
       case 'reaction':
@@ -222,8 +250,28 @@
     post({ type: 'line', line });
     saveLog();
   }
-  function addChat(who, text, mine) {
-    record({ id: nextId++, kind: 'chat', at: Date.now(), who, text, mine: !!mine });
+  function addChat(who, text, mine, mid) {
+    record({ id: nextId++, kind: 'chat', at: Date.now(), who, text, mine: !!mine, mid: cleanMid(mid) });
+  }
+  function addGif(who, url, w, hgt, mine, mid) {
+    record({ id: nextId++, kind: 'gif', at: Date.now(), who, url, w, h: hgt, mine: !!mine, mid: cleanMid(mid) });
+  }
+  // Reactions live on the line as { emoji: [names] }. Returns the new on/off state, or null if no such
+  // line (an old message that scrolled out, or one from before this person joined).
+  function toggleReact(mid, emoji, who, force) {
+    const line = log.find((l) => l.mid === mid && (l.kind === 'chat' || l.kind === 'gif'));
+    if (!line) return null;
+    const r = line.reacts || (line.reacts = {});
+    const names = r[emoji] || [];
+    const has = names.includes(who);
+    const on = force == null ? !has : !!force;
+    if (on === has) return on;
+    if (on) names.push(who); else names.splice(names.indexOf(who), 1);
+    if (names.length) r[emoji] = names; else delete r[emoji];
+    if (!Object.keys(r).length) delete line.reacts;
+    post({ type: 'line', line });
+    saveLog();
+    return on;
   }
   // Muted system line. `merge` collapses a burst (scrubbing = many seeks) into one updating line:
   // the panel replaces the line with the same id.
@@ -258,86 +306,10 @@
   function bumpUnread() {
     if (panelCount > 0) return;
     unread++;
-    renderPill();
     HWP.bus.emit('ui:unread', { count: unread });
   }
 
-  // ---------- pill ----------
-  function buildPill() {
-    el.dot = h('span', { className: 'hwp-dot' });
-    el.label = h('span', { className: 'hwp-pill-label', text: 'Watch Party' });
-    el.badge = h('span', { className: 'hwp-badge', hidden: true });
-    el.chat = h('button', { id: 'hwp-pill-chat', className: 'hwp-pill-chat', type: 'button', title: 'Open the party chat' },
-      h('span', { text: 'Chat' }), el.badge);
-    el.wait = h('div', { className: 'hwp-pill-wait', hidden: true });
-    el.hint = h('div', { className: 'hwp-pill-hint', hidden: true });
-    el.pill = h('div', { id: 'hwp-pill', role: 'region', 'aria-label': 'Watch Party' },
-      h('div', { className: 'hwp-pill-row' }, el.dot, el.label, el.chat), el.wait, el.hint);
-    el.pill.dataset.state = 'idle';
-    document.documentElement.appendChild(el.pill);
-
-    // Never take focus from the player (a focused button would eat the Space key).
-    el.pill.addEventListener('mousedown', (e) => e.preventDefault());
-    // Keys never leak to the Disney+ player (Space = pause, arrows = seek).
-    for (const t of ['keydown', 'keyup', 'keypress']) el.pill.addEventListener(t, (e) => e.stopPropagation());
-    el.pill.addEventListener('click', openPanel);
-    document.addEventListener('fullscreenchange', onFullscreen);
-  }
-
-  function pillState() {
-    const s = status.state;
-    return ['idle', 'hosting', 'joining', 'connected', 'reconnecting', 'error'].includes(s) ? s : 'idle';
-  }
-  function renderPill() {
-    if (!el.pill) return;
-    const s = pillState();
-    const code = HWP.state.code || status.code || '';
-    const host = HWP.state.role === 'host';
-    const count = roster.length + 1;
-    el.pill.dataset.state = s;
-    let label = 'Watch Party';
-    if (s === 'hosting') label = code ? 'Party ' + code : 'Starting…';
-    else if (s === 'joining') label = 'Joining…';
-    else if (s === 'reconnecting') label = 'Reconnecting…';
-    else if (s === 'connected') label = (host && code ? code + ' · ' : '') + count + ' watching';
-    else if (s === 'error') label = 'Watch Party';
-    el.label.textContent = label;
-    el.badge.hidden = !unread;
-    el.badge.textContent = unread > 99 ? '99+' : String(unread);
-    el.chat.setAttribute('aria-label', unread ? 'Open chat, ' + unread + ' unread' : 'Open chat');
-    const w = waitText();
-    el.wait.textContent = w;
-    el.wait.hidden = !w;
-    if (orphaned && !el.hint.textContent) { el.hint.textContent = 'Reload this tab to use the chat'; el.hint.hidden = false; }
-  }
-  function waitText() {
-    if (adMe && inParty()) return 'Ad playing, the others are waiting';
-    if (waiting.length) return 'Waiting for ' + list(waiting) + "'s " + (waiting.length > 1 ? 'ads' : 'ad') + '…';
-    return '';
-  }
-  function hint(text) {
-    el.hint.textContent = text;
-    el.hint.hidden = false;
-    clearTimeout(hintTimer);
-    hintTimer = setTimeout(() => { el.hint.textContent = ''; el.hint.hidden = true; renderPill(); }, 6000);
-  }
-  function openPanel() {
-    if (!hasRuntime()) return hint('Reload this tab to use the chat');
-    try {
-      chrome.runtime.sendMessage({ type: 'open-sidepanel' }, (res) => {
-        let err = null;
-        try { err = chrome.runtime.lastError; } catch (_) {}
-        if (err || !res || !res.ok) hint('Open the chat from the Watch Party icon in your toolbar');
-      });
-    } catch (e) {
-      HWP.log('open-sidepanel failed', e);
-      hint(hasRuntime() ? 'Open the chat from the Watch Party icon in your toolbar' : 'Reload this tab to use the chat');
-    }
-  }
-  function onFullscreen() {
-    el.pill.classList.toggle('hwp-fs', !!document.fullscreenElement);
-    if (floats) floatLayer();
-  }
+  function onFullscreen() { if (floats) floatLayer(); }
 
   // ---------- reactions over the video ----------
   // Lives in <body>, or inside the fullscreen element so it still shows in fullscreen.
@@ -382,7 +354,6 @@
     if (st.state === 'joining' && prev !== 'joining') rosterPrimed = false;
     if (st.state === 'reconnecting' && prev !== 'reconnecting') sys('Lost the connection, reconnecting…');
     if (st.state === 'connected' && prev === 'reconnecting') sys('Back in the party');
-    renderPill();
     postState();
   }
 
@@ -400,7 +371,6 @@
       for (const n of minus(roster, next)) sys(n + ' left');
     }
     roster = next;
-    renderPill();
     postState();
   }
 
@@ -408,8 +378,13 @@
     if (!msg || typeof msg !== 'object') return;
     const who = cleanName(msg.from) || 'Someone';
     if (msg.type === 'chat' && typeof msg.text === 'string' && msg.text.trim()) {
-      addChat(who, msg.text.trim().slice(0, 500), false);
+      addChat(who, msg.text.trim().slice(0, 500), false, msg.mid);
       bumpUnread();
+    } else if (msg.type === 'gif' && gifUrl(msg.url)) {
+      addGif(who, gifUrl(msg.url), gifDim(msg.w), gifDim(msg.h), false, msg.mid);
+      bumpUnread();
+    } else if (msg.type === 'msg-react' && cleanMid(msg.mid) && EMOJIS.includes(msg.emoji)) {
+      toggleReact(cleanMid(msg.mid), msg.emoji, who, !!msg.on);
     } else if (msg.type === 'reaction' && EMOJIS.includes(msg.emoji)) { // whitelist: no arbitrary text floats
       floatEmoji(msg.emoji, who);
       bumpUnread();
@@ -446,7 +421,6 @@
     if (on === adMe) return;
     adMe = on;
     if (inParty()) sys(on ? 'An ad is playing for you. The others are paused until it ends.' : 'Your ad finished, catching up', 'ad:me');
-    renderPill();
     postState();
   }
 
@@ -458,7 +432,6 @@
     if (names.join('\n') === was.join('\n')) return;
     if (names.length) sys('Waiting for ' + list(names) + "'s " + (names.length > 1 ? 'ads' : 'ad') + ' to finish…', 'wait');
     else if (was.length) sys("Everyone's back, resuming", 'wait');
-    renderPill();
     postState();
   }
 
@@ -486,15 +459,14 @@
 
   // ---------- init ----------
   function init() {
-    if (inited || document.getElementById('hwp-pill')) return;
+    if (inited) return;
     inited = true;
     HWP.state.name = cleanName(store.get('hwp-name')) || HWP.state.name || '';
     const st = HWP.net && HWP.net.status ? safe(() => HWP.net.status()) : null;
     if (st && st.state) status = st;
     restoreLog();
-    buildPill();
+    document.addEventListener('fullscreenchange', onFullscreen);
     wire();
-    renderPill();
     connectPort();
     setInterval(() => { if (port) post({ type: 'ping' }); }, PING_MS);
   }
