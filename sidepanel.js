@@ -20,6 +20,8 @@
   const KLIPY = 'https://api.klipy.com/api/v1/';
   const KLIPY_KEY = String((window.HWP_CONFIG && window.HWP_CONFIG.klipyKey) || '').replace(/[^A-Za-z0-9_-]/g, '');
   const GIF_LIMIT = 24;
+  const UPDATE_URL = 'https://raw.githubusercontent.com/hcdonia/disney-watch-party/main/manifest.json';
+  const UPDATE_EVERY_MS = 60 * 60 * 1000;
 
   const panel = document.getElementById('hwp-panel');
   const body = panel.querySelector('.hwp-body');
@@ -32,6 +34,9 @@
   let pending = null;              // optimistic view after a click, until the page answers
   let pinned = true;               // chat follows new lines unless the user scrolled up
   let nameDirty = false;           // the user has typed in the name box: don't overwrite it
+  let updateAvailable = '';        // newer version found on GitHub, or ''
+  let updateDismissed = false;     // hidden for this panel session only
+  let updateEl = null;
   let gifOpen = false, gifTimer = null, gifSeq = 0, gifLastQ = null;
 
   // ---------- helpers ----------
@@ -380,12 +385,54 @@
   // (someone joined) doesn't blur the chat box mid-sentence.
   function mount(nodes) {
     nodes = nodes.filter(Boolean);
+    if (updateAvailable && !updateDismissed) nodes.unshift(updateNotice());
     const cur = [...body.children];
     if (cur.length === nodes.length && cur.every((n, i) => n === nodes[i])) return;
     const focused = body.contains(document.activeElement) ? document.activeElement : null;
     body.replaceChildren(...nodes);
     if (focused && focused.isConnected) focused.focus({ preventScroll: true });
     if (pinned) scrollChat();
+  }
+
+  // ---------- update check ----------
+  function updateNotice() {
+    const local = chrome.runtime.getManifest().version;
+    const text = 'Update available: v' + updateAvailable + ' (you have v' + local + '). Double-click update.command (Mac) or update.bat (Windows) in the extension folder, then press the refresh arrow on chrome://extensions.';
+    if (!updateEl) {
+      const msg = h('span', { className: 'hwp-update-text' });
+      const x = h('button', { className: 'hwp-update-x', type: 'button', title: 'Hide', 'aria-label': 'Hide', text: '\u00d7' });
+      x.addEventListener('click', () => { updateDismissed = true; render(); });
+      updateEl = h('div', { className: 'hwp-update', role: 'status' }, msg, x);
+    }
+    updateEl.firstChild.textContent = text;
+    return updateEl;
+  }
+  function newer(a, b) { // is dotted version a newer than b?
+    const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d > 0;
+    }
+    return false;
+  }
+  async function checkForUpdate() {
+    try {
+      const local = chrome.runtime.getManifest().version;
+      let cached = null;
+      try { cached = (await chrome.storage.local.get('hwp-update'))['hwp-update']; } catch (e) { /* storage unavailable */ }
+      let remote;
+      if (cached && typeof cached.at === 'number' && Date.now() - cached.at < UPDATE_EVERY_MS && cached.version) {
+        remote = cached.version;
+      } else {
+        const r = await fetch(UPDATE_URL, { cache: 'no-store' });
+        if (!r.ok) return;
+        remote = String((await r.json()).version || '');
+        if (!/^\d+(\.\d+)*$/.test(remote)) return;
+        try { await chrome.storage.local.set({ 'hwp-update': { at: Date.now(), version: remote } }); } catch (e) { /* ignore */ }
+      }
+      if (newer(remote, local)) { updateAvailable = remote; render(); }
+    } catch (e) { /* offline or blocked: stay quiet */ }
   }
 
   function render() {
@@ -548,5 +595,6 @@
   wire();
   render();
   connect();
+  checkForUpdate();
   setInterval(() => post({ type: 'ping' }), PING_MS); // keeps the service worker (relay) alive
 })();

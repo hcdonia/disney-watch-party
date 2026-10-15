@@ -4,7 +4,8 @@
   "version": "3.1.0",
   "description": "Watch Disney+ in sync with friends far away. Chat, GIFs and reactions in the side panel. Free, no account.",
   "permissions": [
-    "sidePanel"
+    "sidePanel",
+    "storage"
   ],
   "background": {
     "service_worker": "background.js"
@@ -56,6 +57,7 @@
     "128": "icon128.png"
   },
   "host_permissions": [
-    "https://api.klipy.com/*"
+    "https://api.klipy.com/*",
+    "https://raw.githubusercontent.com/*"
   ]
 }

@@ -304,3 +304,16 @@ input[type="text"].hwp-shake { border-color: var(--bad); animation: hwp-shake 0.
   .hwp-status.hwp-wait::before { animation: none; }
   *, *::before, *::after { transition: none !important; }
 }
+
+.hwp-update {
+  display: flex; align-items: flex-start; gap: 8px;
+  border: 1px solid var(--warn); border-radius: 10px; padding: 8px 10px;
+  font-size: 12px; line-height: 1.4; color: var(--text); background: var(--inset);
+  margin-bottom: 8px;
+}
+.hwp-update-text { flex: 1; }
+.hwp-update-x {
+  margin-left: auto; flex: none; border: 0; outline: none; background: transparent;
+  color: var(--muted); font-size: 16px; line-height: 1; padding: 0 2px; cursor: pointer;
+}
+.hwp-update-x:hover, .hwp-update-x:focus-visible { color: var(--text); }

@@ -9,6 +9,13 @@ A free Chrome extension that keeps Disney+ in sync between two or more people in
 3. Click **Load unpacked** and pick this folder.
 4. After updating the files, click the refresh arrow on the extension card and reload your Disney+ tab.
 
+## Updating
+
+1. In this folder, double-click `update.command` (Mac) or `update.bat` (Windows).
+2. When it finishes, click the refresh arrow on the extension card at `chrome://extensions`, then reload your Disney+ tab.
+
+The side panel tells you when an update is out.
+
 ## Use
 
 1. Open Disney+ and start the show or movie. Everyone should be on the same title.
