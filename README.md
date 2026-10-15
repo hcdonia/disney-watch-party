@@ -24,7 +24,7 @@ On the ad-supported plan, ad breaks sit at fixed spots in the show. When one per
 
 ## GIFs
 
-GIF search uses Tenor. Put a Google Cloud API key with the Tenor API enabled in `config.js` (`tenorKey`). With no key the GIF button says so and everything else still works.
+GIF search uses KLIPY (Tenor's API shut down in June 2026). Make a free app key at https://partner.klipy.com (API Keys) and put it in `config.js` (`klipyKey`). A testing key allows 100 searches an hour; ask KLIPY for production access in the same panel to lift that. With no key the GIF button says so and everything else still works.
 
 ## Troubleshooting
 
@@ -46,7 +46,7 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 - `src/ui.js`: side panel, chat, reactions.
 - `src/main.js`: startup and session restore.
 - `panel.css`: styles for the reaction floats over the video.
-- `sidepanel.html/js/css`, `config.js`: the side panel (party, chat, GIFs, reactions) and its Tenor key.
+- `sidepanel.html/js/css`, `config.js`: the side panel (party, chat, GIFs, reactions) and its KLIPY key.
 - `icon.svg`, `icon16.png`, `icon48.png`, `icon128.png`: icons.
 - `tests/run.mjs`, `tests/test.html`, `tests/test.mp4`: end-to-end tests (`node tests/run.mjs`).
 
@@ -57,5 +57,5 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 
 ## v3.1 notes (2026-10-14)
 - Same-break ads overlap (see Ads above) instead of playing one after another.
-- In-page pill removed. GIF keyboard (Tenor) and per-message emoji reactions in the side panel.
+- In-page pill removed. GIF keyboard (KLIPY) and per-message emoji reactions in the side panel.
 - Fixed: the host could fail to resume after a wait because it trusted a 250ms-old "playing" sample.

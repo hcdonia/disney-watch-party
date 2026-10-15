@@ -56,6 +56,6 @@
     "128": "icon128.png"
   },
   "host_permissions": [
-    "https://tenor.googleapis.com/*"
+    "https://api.klipy.com/*"
   ]
 }

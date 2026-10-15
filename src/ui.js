@@ -60,12 +60,12 @@
     n.append(...kids.filter(Boolean));
     return n;
   }
-  // GIFs come only from Tenor (what the panel's GIF search returns); anything else is dropped on both ends.
+  // GIFs come only from KLIPY (what the panel's GIF search returns); anything else is dropped on both ends.
   function gifUrl(u) {
     if (typeof u !== 'string' || u.length > 500) return null;
     try {
       const x = new URL(u);
-      if (x.protocol !== 'https:' || !(x.hostname === 'tenor.com' || x.hostname.endsWith('.tenor.com'))) return null;
+      if (x.protocol !== 'https:' || !(x.hostname === 'klipy.com' || x.hostname.endsWith('.klipy.com'))) return null;
       return x.href;
     } catch (_) { return null; }
   }

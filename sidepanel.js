@@ -7,7 +7,7 @@
 //        {type:'set-name', name}, {type:'host', name}, {type:'join', name, code}, {type:'leave'},
 //        {type:'chat', text}, {type:'gif', url, w, h}, {type:'msg-react', mid, emoji}, {type:'reaction', emoji},
 //        {type:'control', mode}
-// GIF search is Tenor (key in config.js). Only Tenor image URLs are ever rendered.
+// GIF search is KLIPY (app key in config.js). Only KLIPY image URLs are ever rendered.
 //   in:  {type:'page-ready'|'no-page', tabId} (background), {type:'snapshot', state, status, log, ui},
 //        {type:'state', state, status, ui}, {type:'line', line}, {type:'event', name, payload}
 // User-supplied text (names, chat) is only ever written with textContent.
@@ -17,8 +17,8 @@
   const PING_MS = 20000;
   const NO_PAGE_GRACE_MS = 1500; // a reload of the bound tab drops its port for a moment
   const DISNEY_URL = 'https://www.disneyplus.com/';
-  const TENOR = 'https://tenor.googleapis.com/v2/';
-  const TENOR_KEY = (window.HWP_CONFIG && window.HWP_CONFIG.tenorKey) || '';
+  const KLIPY = 'https://api.klipy.com/api/v1/';
+  const KLIPY_KEY = String((window.HWP_CONFIG && window.HWP_CONFIG.klipyKey) || '').replace(/[^A-Za-z0-9_-]/g, '');
   const GIF_LIMIT = 24;
 
   const panel = document.getElementById('hwp-panel');
@@ -49,7 +49,7 @@
     if (typeof u !== 'string' || u.length > 500) return null;
     try {
       const x = new URL(u);
-      if (x.protocol !== 'https:' || !(x.hostname === 'tenor.com' || x.hostname.endsWith('.tenor.com'))) return null;
+      if (x.protocol !== 'https:' || !(x.hostname === 'klipy.com' || x.hostname.endsWith('.klipy.com'))) return null;
       return x.href;
     } catch (_) { return null; }
   }
@@ -186,7 +186,7 @@
     el.gifQ = h('input', { id: 'hwp-gifq', className: 'hwp-msg', type: 'text', maxLength: 80, placeholder: 'Search GIFs…', autocomplete: 'off' });
     el.gifGrid = h('div', { className: 'hwp-gifgrid' });
     el.gifNote = h('div', { className: 'hwp-gifnote' });
-    el.gifTray = h('div', { id: 'hwp-giftray', className: 'hwp-giftray' }, el.gifQ, el.gifNote, el.gifGrid, h('div', { className: 'hwp-gifcredit', text: 'Powered by Tenor' }));
+    el.gifTray = h('div', { id: 'hwp-giftray', className: 'hwp-giftray' }, el.gifQ, el.gifNote, el.gifGrid, h('div', { className: 'hwp-gifcredit', text: 'Powered by KLIPY' }));
     el.msg = h('input', { id: 'hwp-msg', className: 'hwp-msg', type: 'text', maxLength: 500, placeholder: 'Say something…',
       autocomplete: 'off' });
   }
@@ -208,22 +208,21 @@
     if (!force && q === gifLastQ) return;
     gifLastQ = q;
     el.gifGrid.replaceChildren();
-    if (!TENOR_KEY) { el.gifNote.textContent = 'GIF search is not set up yet (missing Tenor key in config.js).'; return; }
+    if (!KLIPY_KEY) { el.gifNote.textContent = 'GIF search is not set up yet (missing KLIPY key in config.js).'; return; }
     el.gifNote.textContent = 'Loading…';
     const seq = ++gifSeq;
-    const u = new URL(TENOR + (q ? 'search' : 'featured'));
-    u.searchParams.set('key', TENOR_KEY);
-    u.searchParams.set('client_key', 'disney_watch_party');
-    u.searchParams.set('limit', String(GIF_LIMIT));
-    u.searchParams.set('media_filter', 'tinygif');
-    u.searchParams.set('contentfilter', 'medium');
+    const u = new URL(KLIPY + KLIPY_KEY + '/gifs/' + (q ? 'search' : 'trending'));
+    u.searchParams.set('per_page', String(GIF_LIMIT));
+    u.searchParams.set('content_filter', 'medium');
+    u.searchParams.set('format_filter', 'gif,webp');
     if (q) u.searchParams.set('q', q);
     let results = [];
     try {
       const r = await fetch(u.toString());
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
-      results = Array.isArray(j.results) ? j.results : [];
+      const d = j && j.data;
+      results = Array.isArray(d) ? d : (d && Array.isArray(d.data) ? d.data : []);
     } catch (e) {
       if (seq !== gifSeq) return;
       el.gifNote.textContent = 'Could not load GIFs (' + (e && e.message ? e.message : 'network') + '). Try again.';
@@ -233,19 +232,21 @@
     el.gifGrid.replaceChildren();
     let n = 0;
     for (const it of results) {
-      const f = it && it.media_formats && it.media_formats.tinygif;
-      const url = f && gifUrl(f.url);
-      if (!url) continue;
-      const [w, hgt] = Array.isArray(f.dims) ? f.dims : [0, 0];
-      const img = h('img', { className: 'hwp-gifpick', src: url, alt: (it.content_description || 'GIF').slice(0, 100), loading: 'lazy', draggable: false });
-      img.dataset.w = w; img.dataset.h = hgt;
+      // Small animated webp for the picker thumbnail; the "sm" size (about 200px wide) is what gets sent.
+      const file = it && it.file && typeof it.file === 'object' ? it.file : null;
+      const pick = file && ((file.xs && (file.xs.webp || file.xs.gif)) || (file.sm && (file.sm.webp || file.sm.gif)));
+      const send = file && ((file.sm && (file.sm.webp || file.sm.gif)) || (file.md && (file.md.webp || file.md.gif)));
+      const thumb = pick && gifUrl(pick.url), url = send && gifUrl(send.url);
+      if (!thumb || !url) continue;
+      const img = h('img', { className: 'hwp-gifpick', src: thumb, alt: String(it.title || 'GIF').slice(0, 100), loading: 'lazy', draggable: false });
+      img.dataset.url = url; img.dataset.w = +send.width || 0; img.dataset.h = +send.height || 0;
       el.gifGrid.appendChild(img);
       n++;
     }
     el.gifNote.textContent = n ? '' : (q ? 'No GIFs for "' + q + '"' : 'Nothing to show right now');
   }
   function sendGif(img) {
-    const url = gifUrl(img.currentSrc || img.src);
+    const url = gifUrl(img.dataset.url);
     if (!url) return;
     if (!post({ type: 'gif', url, w: +img.dataset.w || null, h: +img.dataset.h || null })) return;
     pinned = true;

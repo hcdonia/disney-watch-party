@@ -188,10 +188,10 @@ async function sameBreak(browser) {
     const took = Date.now() - hostAdAt;
     if (logs.length) console.log(logs.join('\n'));
     report('6.3 both resume together after ONE ad length', resumed && took < AD + 5000, `took=${took}ms (ad=${AD}) ${JSON.stringify(tl)} host=${Math.round(await ms(host))} guest=${Math.round(await ms(guest))}`);
-    // GIF relay: a Tenor url goes through, anything else is dropped.
-    await host.evaluate(() => HWP.ui.command({ type: 'gif', url: 'https://media.tenor.com/abc/tenor.gif', w: 220, h: 124 }));
+    // GIF relay: a KLIPY url goes through, anything else is dropped.
+    await host.evaluate(() => HWP.ui.command({ type: 'gif', url: 'https://static.klipy.com/abc/sm.webp', w: 220, h: 124 }));
     await host.evaluate(() => HWP.ui.command({ type: 'gif', url: 'https://evil.example/x.gif', w: 220, h: 124 }));
-    const gotGif = await waitFor(() => gotMsg(guest, `(m) => m && m.type === 'gif' && m.url === 'https://media.tenor.com/abc/tenor.gif'`), 3000);
+    const gotGif = await waitFor(() => gotMsg(guest, `(m) => m && m.type === 'gif' && m.url === 'https://static.klipy.com/abc/sm.webp'`), 3000);
     const badGif = await gotMsg(guest, `(m) => m && m.type === 'gif' && /evil/.test(m.url)`);
     const logged = await guest.evaluate(() => HWP.ui.snapshot().log.some((l) => l.kind === 'gif' && l.who === 'Hunter'));
     report('6.4 gif relays to guest and lands in its chat log', gotGif && logged && !badGif, `got=${gotGif} logged=${logged} bad=${badGif}`);

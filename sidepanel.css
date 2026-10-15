@@ -281,7 +281,7 @@ input[type="text"].hwp-shake { border-color: var(--bad); animation: hwp-shake 0.
 .hwp-gifpick:hover { transform: scale(1.03); }
 .hwp-gifcredit { font-size: 10px; color: var(--faint); text-align: right; }
 .hwp-gifline { padding-top: 2px; }
-.hwp-gif { display: block; max-width: 220px; width: 100%; height: auto; border-radius: 8px; background: var(--chip); }
+.hwp-gif { display: block; max-width: 240px; width: 100%; height: auto; border-radius: 8px; background: var(--chip); }
 
 /* ---------- footer ---------- */
 .hwp-foot {
