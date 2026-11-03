@@ -22,7 +22,7 @@
   const KLIPY_KEY = String((window.HWP_CONFIG && window.HWP_CONFIG.klipyKey) || '').replace(/[^A-Za-z0-9_-]/g, '');
   const GIF_LIMIT = 24;
   const UPDATE_URL = 'https://raw.githubusercontent.com/hcdonia/disney-watch-party/main/manifest.json';
-  const UPDATE_EVERY_MS = 60 * 60 * 1000;
+  const UPDATE_EVERY_MS = 5 * 60 * 1000; // re-checked while the panel stays open, so a release shows within minutes
 
   const panel = document.getElementById('hwp-panel');
   const body = panel.querySelector('.hwp-body');
@@ -600,5 +600,6 @@
   render();
   connect();
   checkForUpdate();
+  setInterval(checkForUpdate, UPDATE_EVERY_MS);
   setInterval(() => post({ type: 'ping' }), PING_MS); // keeps the service worker (relay) alive
 })();

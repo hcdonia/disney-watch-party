@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Watch Party (Hunty)",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Watch Disney+ or Prime Video in sync with friends far away. Chat, GIFs and reactions in the side panel. Free, no account.",
   "permissions": [
     "sidePanel",
