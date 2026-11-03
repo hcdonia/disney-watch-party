@@ -11,6 +11,14 @@ A free Chrome extension that keeps Disney+ or Amazon Prime Video in sync between
 
 ## Updating
 
+Easiest (Mac): paste this into Terminal and press Enter. It finds your copy, updates it, and restarts Chrome (your tabs come back). On a new computer it installs to `~/Watch Party` and walks you through Load unpacked once.
+
+```
+curl -fsSL https://raw.githubusercontent.com/hcdonia/disney-watch-party/main/install.sh | bash
+```
+
+Or by hand:
+
 1. In this folder, double-click `update.command` (Mac) or `update.bat` (Windows).
 2. When it finishes, click the refresh arrow on the extension card at `chrome://extensions`, then reload your Disney+ or Prime Video tab.
 
