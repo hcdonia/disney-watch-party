@@ -1,8 +1,8 @@
-// Disney Watch Party: sync (PLAN.md v3 "Sync"). Program-ms model.
+// Watch Party: sync (PLAN.md v3 "Sync"). Program-ms model, same on Disney+ and Prime Video.
 //
-// Every position here is Disney+ PROGRAM time in milliseconds from HWP.player (the player's own
-// timeline.info.playheadPositionMs). <video>.currentTime is NOT program time on Disney+ (it resets on
-// ads and reloads, and its duration is the buffered edge), so this file never touches <video>.
+// Every position here is PROGRAM time in milliseconds from HWP.player (Disney+: the player's own
+// timeline.info.playheadPositionMs; Prime: the bridge's ad-free position). <video>.currentTime is NOT
+// program time on either site (ads, jingles, reloads), so this file never touches <video>.
 //
 // What it does:
 // - Spots local play / pause / seek by comparing consecutive player:state samples, and sends them.
@@ -15,10 +15,12 @@
 //   playing just short of X, we keep playing INTO the break instead of pausing, so our ad runs at the same
 //   time as theirs (the room waits once, for the longest ad, not once per person). If no ad shows up
 //   within a few seconds (ad-free plan, break already seen) we pause and wait like before.
-// - Follows the host to the same title (`url` on sync/tick).
+// - Disney+: follows the host to the same title (`url` on sync/tick). Prime Video can't be followed by URL
+//   (one detail page plays every episode), so there everyone opens the same episode and `title` (the
+//   bridge's id for what is playing) keeps a different episode from being seeked around.
 //
-// Messages (all positions are program ms): play {ms, url}, pause {ms, url}, seek {ms, playing, url},
-// sync / tick {ms, playing, ad, adLeftMs, url}, ad {on, leftMs, ms}, sync-request.
+// Messages (all positions are program ms): play {ms, url, title}, pause {ms, url, title},
+// seek {ms, playing, url, title}, sync / tick {ms, playing, ad, adLeftMs, url, title}, ad {on, leftMs, ms}, sync-request.
 // Bus out: sync:event {kind, by, ms, time}, sync:ad {on, who, leftMs}, sync:waiting {names}.
 (() => {
   const H = window.HWP;
@@ -33,7 +35,7 @@
   const OWN_SEEK_MS = 8000;       // a seek we issued lands within this long...
   const OWN_SEEK_NEAR_MS = 2000;  // ...and within this far of where we asked
   const ACTION_WIN_MS = 2000;     // after a play/pause/seek, ignore host sync/ticks that were already in flight
-  const GRACE_MS = 3000;          // guests: Disney+ autoplay / resume right after load is not a person
+  const GRACE_MS = 3000;          // guests: the player's autoplay / resume right after load is not a person
   const INPUT_MS = 1000;          // ...unless there was a real click / keypress this recently
   const LATENCY_MAX_MS = 5000;    // clocks differ between machines; cap the one-way delay we trust
   const AD_REFRESH_MS = 10000;    // while in an ad, re-announce it (keeps others' wait alive, updates time left)
@@ -58,6 +60,7 @@
   let resumeAfter = false;        // host: room was playing when it got busy => resume when it clears
   // Misc
   let syncTimer = null, lastUrl = location.href, lastPath = location.pathname, lastNetState = null, lastPeers = 0;
+  let lastTitle;                  // player's title id from the last sample (undefined before the first)
 
   const now = () => Date.now();
   const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -81,7 +84,7 @@
     const ms = p.ms();
     if (ms == null) return null;
     // Sent during our own ad too (ad: true, playhead frozen at the break) so late joiners know to wait.
-    return { type, ms: Math.round(ms), playing: p.playing(), ad: localAd, adLeftMs: localAd ? p.adLeftMs() : null, url: location.href };
+    return { type, ms: Math.round(ms), playing: p.playing(), ad: localAd, adLeftMs: localAd ? p.adLeftMs() : null, url: location.href, title: myTitle() };
   }
   function sendState(type) { const m = stateMsg(type); if (m) send(m); }
   // Host only. Debounced so hello + roster + sync-request bursts produce one sync.
@@ -161,14 +164,19 @@
     actionAt = t;
     const ms = Math.round(s.ms);
     H.log('sync: local', kind, ms);
-    if (kind === 'seek') send({ type: 'seek', ms, playing: settled ? settled.playing : !!s.playing, url: location.href });
-    else send({ type: kind, ms, url: location.href });
+    if (kind === 'seek') send({ type: 'seek', ms, playing: settled ? settled.playing : !!s.playing, url: location.href, title: myTitle() });
+    else send({ type: kind, ms, url: location.href, title: myTitle() });
   }
 
   function onState(s) {
     if (!s) return;
     const t = s.at || now();
     if (location.pathname !== lastPath) { lastPath = location.pathname; resetBaseline(); } // SPA title change
+    if (s.title !== lastTitle) { // Prime: next episode autoplays on the same page
+      const had = lastTitle !== undefined;
+      lastTitle = s.title;
+      if (had) { resetBaseline(); sendSyncSoon(); }
+    }
     if (!!s.ad !== localAd) setLocalAd(!!s.ad, s.adLeftMs);
     else if (localAd && t >= adRefreshAt) {
       adRefreshAt = t + AD_REFRESH_MS;
@@ -277,7 +285,7 @@
     actionAt = now();
     const ms = Math.round(p.ms());
     H.log('sync: room resumes at', ms);
-    send({ type: 'play', ms, url: location.href });
+    send({ type: 'play', ms, url: location.href, title: myTitle() });
   }
 
   // Left the party: nobody to wait for. Never touches the player (no resume on leave).
@@ -287,19 +295,39 @@
     updateRoom();
   }
 
-  // ---------- follow the host to the same title ----------
-  function titleId(path) { const m = /\/(?:play|video)\/([^/?#]+)/.exec(path || ''); return m ? m[1] : null; }
-  function urlTitle(url) { try { return titleId(new URL(url, location.href).pathname); } catch (_) { return null; } }
-  // Unknown on either side => assume same (test pages, browse pages).
-  function sameTitle(url) { const a = typeof url === 'string' ? urlTitle(url) : null, b = titleId(location.pathname); return !a || !b || a === b; }
+  // ---------- same title / follow the host ----------
+  // Which streaming site a URL is on: 'disney', 'prime', or null (test pages, anything else).
+  function siteOf(host) {
+    if (/(^|\.)disneyplus\.com$/.test(host)) return 'disney';
+    if (/(^|\.)(primevideo|amazon)\.[a-z.]+$/.test(host)) return 'prime';
+    return null;
+  }
+  const toUrl = (url) => { try { return typeof url === 'string' ? new URL(url, location.href) : null; } catch (_) { return null; } };
+  // Title id from a Disney+ URL (/play/X, /video/X). Prime URLs don't name the episode: null.
+  function urlTitle(u) {
+    if (!u || siteOf(u.hostname) !== 'disney') return null;
+    const m = /\/(?:play|video)\/([^/?#]+)/.exec(u.pathname);
+    return m ? m[1] : null;
+  }
+  const myTitle = () => { const p = P(); return (p && p.title && p.title()) || null; };
+  // Unknown on either side => assume same (test pages, browse pages, older senders).
+  function sameTitle(msg) {
+    const u = toUrl(msg && msg.url);
+    const a = u && siteOf(u.hostname), b = siteOf(location.hostname);
+    if (a && b && a !== b) return false;                       // Disney+ vs Prime: never the same show
+    const theirs = msg && typeof msg.title === 'string' ? msg.title : null, mine = myTitle();
+    if (theirs && mine) return theirs === mine;               // the players' own ids (Prime episodes)
+    const x = urlTitle(u), y = urlTitle(location);
+    return !x || !y || x === y;
+  }
 
   function followHost(url) {
-    if (typeof url !== 'string') return false;
-    let u;
-    try { u = new URL(url, location.href); } catch (_) { return false; }
-    const want = titleId(u.pathname);
+    const u = toUrl(url);
+    // Disney+ to Disney+ only: Prime can't be followed by URL, and a path from another site means nothing here.
+    if (!u || siteOf(u.hostname) !== 'disney' || siteOf(location.hostname) !== 'disney') return false;
+    const want = urlTitle(u);
     // Host browsing, or same title (compare ids so a /video/X -> /play/X redirect can't loop us).
-    if (!want || want === titleId(location.pathname)) return false;
+    if (!want || want === urlTitle(location)) return false;
     // Guard lives in sessionStorage because the navigation reloads this script.
     let last = null;
     try { last = JSON.parse(sessionStorage.getItem(NAV_KEY) || 'null'); } catch (_) {}
@@ -322,6 +350,7 @@
     if (S.role !== 'guest') return; // the host is the clock; it never obeys ticks
     setMemberAd(msg.from || 'Host', !!msg.ad, msg.adLeftMs, msg.ad ? msg.ms : null); // the host's own ad state rides on every tick
     if (followHost(msg.url)) return;
+    if (!sameTitle(msg)) return; // different show/episode: don't drag our playhead around
     const p = P();
     if (!ready() || localAd || waiting.length) return; // in an ad, or the room is waiting: the host's play resumes us
     // Ticks (and syncs we asked for BEFORE the last action) may predate that action: skip them for a moment.
@@ -339,7 +368,7 @@
   function applyAction(msg) {
     if (localAd) return;                                          // catch up via sync-request when the ad ends
     if (S.role === 'host' && S.controlMode === 'host') return;    // guests may not drive in host mode
-    if (!sameTitle(msg.url)) return;                              // different show: the host's tick moves guests over
+    if (!sameTitle(msg)) return;                                  // different show: the host's tick moves Disney+ guests over
     const p = P();
     const ms = num(msg.ms);
     if (!ready() || ms == null) return;

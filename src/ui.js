@@ -8,7 +8,7 @@
 //      of the same party via sessionStorage),
 //   3. reaction floats over the video.
 // There is nothing else on the page: the chat opens from the toolbar icon.
-// Nothing here resizes or restyles Disney+'s own layout. User text is only ever set with textContent.
+// Nothing here resizes or restyles the site's own layout. User text is only ever set with textContent.
 (() => {
   if (!window.HWP || HWP.ui) return;
 

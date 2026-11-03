@@ -1,6 +1,6 @@
 // MV3 service worker (PLAN.md v3 "UI"). Two jobs:
 //  1. Open Chrome's side panel from the toolbar icon (setPanelBehavior).
-//  2. Relay between the side panel and the Disney+ content script of the tab it is bound to.
+//  2. Relay between the side panel and the Disney+ / Prime Video content script of the tab it is bound to.
 //     Content script: runtime.connect({name:'hwp-page'}). Side panel: runtime.connect({name:'hwp-panel'})
 //     then {type:'bind', tabId}. Page -> every panel bound to its tab; panel -> its tab's page.
 // State is in memory only: if the worker restarts, every port drops and both sides reconnect.

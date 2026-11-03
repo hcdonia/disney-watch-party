@@ -1,5 +1,5 @@
 #!/bin/bash
-# Disney Watch Party updater (Mac). Double-click this file.
+# Watch Party updater (Mac). Double-click this file.
 cd "$(dirname "$0")" || exit 1
 REPO_ZIP="${HWP_ZIP_URL:-https://github.com/hcdonia/disney-watch-party/archive/refs/heads/main.zip}"
 DIR="$(pwd)"
@@ -16,7 +16,7 @@ fail() {
   exit 1
 }
 
-echo "Updating Disney Watch Party..."
+echo "Updating Watch Party..."
 done_update=0
 if [ -d .git ] && command -v git >/dev/null 2>&1; then
   if git pull --ff-only >/dev/null 2>&1; then done_update=1; fi
@@ -34,7 +34,7 @@ fi
 VER=$(grep -m1 '"version"' manifest.json | tr -dc '0-9.')
 [ -n "$VER" ] || fail "could not read the new version."
 echo
-echo "Updated to v$VER. Last step: in the Chrome tab that just opened, click the refresh arrow on \"Disney Watch Party\", then reload your Disney+ tab."
+echo "Updated to v$VER. Last step: in the Chrome tab that just opened, click the refresh arrow on \"Watch Party (Hunty)\", then reload your Disney+ or Prime Video tab."
 echo
 if [ -z "$HWP_NO_OPEN" ]; then
   open -a "Google Chrome" "chrome://extensions" >/dev/null 2>&1 || echo "(Chrome did not open by itself. Open a new tab, type chrome://extensions and press Enter.)"

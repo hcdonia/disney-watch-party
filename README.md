@@ -1,24 +1,25 @@
-# Disney Watch Party (v3) (Hunty)
+# Watch Party (Hunty) (v3.2)
 
-A free Chrome extension that keeps Disney+ in sync between two or more people in different places. Play, pause and seek happen for everyone, and there is a chat sidebar with emoji reactions. No account, no server of ours.
+A free Chrome extension that keeps Disney+ or Amazon Prime Video in sync between two or more people in different places. Play, pause and seek happen for everyone, and there is a chat sidebar with emoji reactions. No account, no server of ours.
 
 ## Install (do this on every computer)
 
 1. Open `chrome://extensions`.
 2. Turn on **Developer mode** (top right).
 3. Click **Load unpacked** and pick this folder.
-4. After updating the files, click the refresh arrow on the extension card and reload your Disney+ tab.
+4. After updating the files, click the refresh arrow on the extension card and reload your Disney+ or Prime Video tab.
 
 ## Updating
 
 1. In this folder, double-click `update.command` (Mac) or `update.bat` (Windows).
-2. When it finishes, click the refresh arrow on the extension card at `chrome://extensions`, then reload your Disney+ tab.
+2. When it finishes, click the refresh arrow on the extension card at `chrome://extensions`, then reload your Disney+ or Prime Video tab.
 
 The side panel tells you when an update is out.
 
 ## Use
 
-1. Open Disney+ and start the show or movie. Everyone should be on the same title.
+1. Open Disney+ or Prime Video (primevideo.com or amazon.com/gp/video) and start the show or movie. Everyone should be on the same title, on the same site.
+   - On Prime Video everyone opens the same episode themselves: Prime plays every episode from one page, so the party can't move you to the host's episode the way it does on Disney+.
 2. Click the Watch Party icon in the toolbar to open the side panel. Type your name.
 3. One person clicks **Start a party** and shares the 4-letter code.
 4. Everyone else types the code and clicks **Join**. The panel shows "Connected" when you are linked.
@@ -27,7 +28,7 @@ The side panel tells you when an update is out.
 
 ## Ads
 
-On the ad-supported plan, ad breaks sit at fixed spots in the show. When one person's ad starts, anyone right behind the same break keeps playing into it so their ad runs at the same time, and the room waits once (for the longest ad) instead of once per person. Anyone further away pauses and waits. When the last ad ends, everyone resumes together at the same spot.
+On the ad-supported plans (Disney+ and Prime Video), ad breaks sit at fixed spots in the show. When one person's ad starts, anyone right behind the same break keeps playing into it so their ad runs at the same time, and the room waits once (for the longest ad) instead of once per person. Anyone further away pauses and waits. When the last ad ends, everyone resumes together at the same spot.
 
 ## GIFs
 
@@ -36,12 +37,13 @@ GIF search uses KLIPY (Tenor's API shut down in June 2026). Make a free app key 
 ## Troubleshooting
 
 - **Code not found:** the host has not started the party yet, or the code was typed wrong.
-- **Stuck on "reconnecting":** the host closed the tab. It retries for a couple of minutes; it recovers as soon as the host reopens Disney+ (a host reload restores the party on its own).
-- **Nothing syncs:** reload the Disney+ tab on both sides and make sure everyone is on the same title.
+- **Stuck on "reconnecting":** the host closed the tab. It retries for a couple of minutes; it recovers as soon as the host reopens the site (a host reload restores the party on its own).
+- **Nothing syncs:** reload the Disney+ / Prime Video tab on both sides and make sure everyone is on the same title (and the same episode).
+- **Prime Video is a few seconds off after a reload:** press play or pause once. Prime reports its real position on every play/pause, and the extension lines up from that.
 
 ## Privacy
 
-Video and chat go directly between your browsers (peer-to-peer). The only outside service is PeerJS's free public signaling server, which sees the room id used to introduce the browsers. Nothing is recorded, nothing is stored, and no Disney+ login details are touched. The extension asks for no extra permissions.
+Video and chat go directly between your browsers (peer-to-peer). The only outside service is PeerJS's free public signaling server, which sees the room id used to introduce the browsers. Nothing is recorded, nothing is stored, and no Disney+ or Amazon login details are touched. The extension asks for no extra permissions.
 
 ## Files
 
@@ -50,6 +52,7 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 - `src/state.js`: shared state and event bus.
 - `src/net.js`: connections, rooms, names, relay.
 - `src/sync.js`: player control, drift fixes, ad handling.
+- `src/player.js`, `src/bridge.js` (Disney+), `src/bridge-prime.js` (Prime Video): read each site's player and control it.
 - `src/ui.js`: side panel, chat, reactions.
 - `src/main.js`: startup and session restore.
 - `panel.css`: styles for the reaction floats over the video.
@@ -66,3 +69,9 @@ Video and chat go directly between your browsers (peer-to-peer). The only outsid
 - Same-break ads overlap (see Ads above) instead of playing one after another.
 - In-page pill removed. GIF keyboard (KLIPY) and per-message emoji reactions in the side panel.
 - Fixed: the host could fail to resume after a wait because it trusted a 250ms-old "playing" sample.
+
+## v3.2 notes (2026-11-02)
+- Amazon Prime Video support (primevideo.com, amazon.com/gp/video, amazon.com Prime Video title pages). One extension for both sites.
+- Prime's video clock includes a short intro jingle and every ad, so the extension works out the real show position from Prime's own playlist and ad lengths, and corrects itself from the position Prime reports on each play/pause. Ads, room waits and "same break" ad overlap work as on Disney+.
+- A guest on a different Prime episode is left alone instead of being seeked around.
+- Extension renamed to "Watch Party (Hunty)".

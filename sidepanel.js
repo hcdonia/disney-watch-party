@@ -1,5 +1,5 @@
 // Watch Party side panel: the whole party UI (name, start/join, code, people, control toggle,
-// chat, reactions, leave). It holds no party state of its own: it mirrors what the Disney+ tab's
+// chat, reactions, leave). It holds no party state of its own: it mirrors what the Disney+ / Prime tab's
 // content script (src/ui.js) sends through background.js, and sends commands back.
 //
 // Port protocol (name 'hwp-panel'):
@@ -17,6 +17,7 @@
   const PING_MS = 20000;
   const NO_PAGE_GRACE_MS = 1500; // a reload of the bound tab drops its port for a moment
   const DISNEY_URL = 'https://www.disneyplus.com/';
+  const PRIME_URL = 'https://www.amazon.com/gp/video/storefront';
   const KLIPY = 'https://api.klipy.com/api/v1/';
   const KLIPY_KEY = String((window.HWP_CONFIG && window.HWP_CONFIG.klipyKey) || '').replace(/[^A-Za-z0-9_-]/g, '');
   const GIF_LIMIT = 24;
@@ -152,10 +153,12 @@
     el.loadStatus = h('div', { className: 'hwp-status hwp-wait', text: 'Connecting to this tab…' });
 
     el.open = h('button', { id: 'hwp-open', className: 'hwp-btn', type: 'button', text: 'Open Disney+' });
+    el.openPrime = h('button', { id: 'hwp-open-prime', className: 'hwp-btn hwp-secondary', type: 'button', text: 'Open Prime Video' });
     el.noPage = [
-      h('h2', { className: 'hwp-heading', text: 'Open a Disney+ video first' }),
-      h('p', { className: 'hwp-blurb', text: 'The party runs inside your Disney+ tab. Open Disney+ in this tab and pick something to watch. Already there? Reload the tab.' }),
+      h('h2', { className: 'hwp-heading', text: 'Open Disney+ or Prime Video first' }),
+      h('p', { className: 'hwp-blurb', text: 'The party runs inside your Disney+ or Prime Video tab. Open one in this tab and pick something to watch. Already there? Reload the tab.' }),
       el.open,
+      el.openPrime,
     ];
 
     el.name = h('input', { id: 'hwp-name', type: 'text', maxLength: 24, placeholder: 'What should we call you?',
@@ -260,7 +263,8 @@
   }
 
   function wire() {
-    el.open.addEventListener('click', openDisney);
+    el.open.addEventListener('click', () => openSite(DISNEY_URL));
+    el.openPrime.addEventListener('click', () => openSite(PRIME_URL));
     el.name.addEventListener('input', () => { nameDirty = true; });
     el.name.addEventListener('change', () => {
       const name = cleanName(el.name.value);
@@ -349,12 +353,12 @@
     pending = { state: 'joining', code };
     render();
   }
-  function openDisney() {
+  function openSite(url) {
     const done = () => { try { void chrome.runtime.lastError; } catch (_) {} };
     try {
-      if (typeof tabId === 'number') chrome.tabs.update(tabId, { url: DISNEY_URL }, done);
-      else chrome.tabs.create({ url: DISNEY_URL }, done);
-    } catch (_) { window.open(DISNEY_URL, '_blank'); }
+      if (typeof tabId === 'number') chrome.tabs.update(tabId, { url }, done);
+      else chrome.tabs.create({ url }, done);
+    } catch (_) { window.open(url, '_blank'); }
   }
   function copyCode() {
     const code = el.codeText.textContent;

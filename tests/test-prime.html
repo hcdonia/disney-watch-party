@@ -1,0 +1,69 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>HWP Prime test page</title>
+<link rel="stylesheet" href="../panel.css">
+<style>body{background:#000;color:#fff;font-family:sans-serif}</style></head>
+<body>
+<!-- Shape of Prime's player (PLAN.md v4): a plain <video> inside div#dv-web-player, plus the ad timer. -->
+<div id="dv-web-player"><div class="dv-player-fullscreen">
+  <video class="tst-video-overlay-player-html5" src="prime.webm" muted style="width:64px;height:36px"></video>
+  <video id="v" src="prime.webm" muted style="width:640px;height:360px"></video>
+  <span class="atvwebplayersdk-ad-timer-remaining-time" style="display:none"></span>
+</div></div>
+<script>
+window.chrome = { runtime: {
+  connect: () => ({ postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }),
+  sendMessage: () => {}, getURL: (p) => p, onMessage: { addListener() {} } } };
+window.__hwpEvents = [];
+</script>
+<!-- In the extension this is a main-world content script at document_start: before the player's requests. -->
+<script src="../src/bridge-prime.js"></script>
+<script>
+// The fake "player" asks for its playlist and ads the way Prime's does (tests/run.mjs serves /fake-prime/).
+// Timeline (video seconds): 0-6 jingle, 6-20 title 0-14s, 20-30 ad (M1), 30-60 title 14-44s.
+(() => {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('noplaylist')) {
+    fetch('/fake-prime/playback/prs/GetVodPlaybackResources?titleId=' + (q.get('gti') || 'GTI1') + '&consumptionType=Streaming');
+    const x = new XMLHttpRequest(); // the ads answer comes over XHR here, to cover that hook too
+    x.open('GET', '/fake-prime/cdp/getVideoAds?adMarkerId=M1&gti=x');
+    x.send();
+  }
+  window.__primeSession = (cp) => fetch('/fake-prime/playback/pes/UpdateSession', { method: 'POST',
+    body: JSON.stringify({ streamInfo: { vodProgressInfo: { currentProgressTime: 'PT' + cp + 'S' } } }) });
+  const v = () => document.getElementById('v');
+  const timer = () => document.querySelector('.atvwebplayersdk-ad-timer-remaining-time');
+  window.__v = () => v().currentTime;
+  window.__setV = (t) => { v().currentTime = t; };
+  window.__screenAd = (on, text) => { timer().textContent = text || ''; timer().style.display = on ? 'inline' : 'none'; };
+  // A real ad timer counts down: drive it from the video clock while the timeline says we're in the ad.
+  setInterval(() => {
+    if (q.has('noplaylist')) return;
+    const t = v().currentTime;
+    if (t >= 20 && t < 30) window.__screenAd(true, '0:' + String(Math.ceil(30 - t)).padStart(2, '0'));
+    else window.__screenAd(false);
+  }, 200);
+})();
+</script>
+<script src="../peerjs.min.js"></script>
+<script src="../src/state.js"></script>
+<script>
+(() => {
+  const rec = ['sync:event', 'sync:ad', 'sync:waiting', 'net:status', 'net:roster', 'net:message', 'player:state'];
+  const orig = HWP.bus.emit.bind(HWP.bus);
+  HWP.bus.emit = (name, ...args) => {
+    if (rec.includes(name)) {
+      const e = { name, payload: args[0], at: Date.now() };
+      if (name === 'player:state') { const i = window.__hwpEvents.findIndex((x) => x.name === name); if (i >= 0) window.__hwpEvents.splice(i, 1); }
+      window.__hwpEvents.push(e);
+      if (window.__hwpEvents.length > 500) window.__hwpEvents.splice(0, 100);
+    }
+    return orig(name, ...args);
+  };
+})();
+</script>
+<script src="../src/net.js"></script>
+<script src="../src/player.js"></script>
+<script src="../src/sync.js"></script>
+<script src="../src/ui.js"></script>
+<script src="../src/main.js"></script>
+</body></html>

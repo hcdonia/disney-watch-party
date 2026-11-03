@@ -137,3 +137,30 @@ tests/test.html gets a FAKE `<disney-web-player>` main-world shim (`tests/fake-p
 - 2026-10-10 00:25 all three v3 lanes landed; foreman: manifest (sidePanel, background, web_accessible_resources, no popup so the toolbar icon opens the panel), removed popup.* and tests/run.v1.mjs. tests/run.mjs: ALL 17 PASS (program-ms sync, 3-party, host reload, room-waits ad flow, reactions).
 - Needs real-Chrome verification: bridge injection on disneyplus.com, sidePanel.open from the pill, ad flow with a live ad. Known limit (FIXED 2026-10-14, v3.1 AD JOIN in sync.js): two people hitting the same break used to play their ads one after another.
 - 2026-10-14 v3.1: ad join (`ad {ms}` carries the break; a member within 6s before a known break keeps playing into it, 4s grace, else pauses as before); pill removed (toolbar icon only); GIF keyboard (KLIPY, app key in config.js, `gif {url,w,h,mid}`, *.klipy.com hosts only; Tenor's API died 2026-06-30); per-message emoji reactions (`msg-react {mid, emoji, on}`, chat/gif lines carry a shared `mid`, reacts stored on the line as {emoji: [names]}); resumeRoom/maybeWaitPause send play/pause unconditionally (stale-sample bug). tests/run.mjs: 23 PASS incl. scenario 6 (same break, gif relay, reactions). KLIPY key: Hunter signs up at partner.klipy.com, foreman pastes it into config.js.
+
+# v4: Prime Video (2026-11-02)
+
+Goal: the same extension works on Amazon Prime Video. Only the page bridge is site-specific; net/sync/ui/side panel are shared.
+
+## Facts (from maintained open-source Prime code, not yet probed live by us)
+Sources: PreMiD `websites/P/Prime Video` (player/timeline*.ts, updated 2026-10-24), Dreamlinerm/Netflix-Prime-Auto-Skip `src/content-script/amazon.ts` (2026-11-01), Midra429/NCOverlay page-primeVideo (2026-08).
+- Player = plain `<video>` in `div[id^=dv-web-player]` (several can coexist; old episode stays hidden and paused). Trailer overlay video `.tst-video-overlay-player-html5`: ignore.
+- `<video>.currentTime` = intro jingle (~6s) + title + ad pods spliced in (SSAI). Ads play in the same element.
+- `/playback/prs/Get*PlaybackResources?titleId=GTI` -> `vodPlaylistedPlaybackUrls.result.playbackUrls.intraTitlePlaylist`: items before the first `Main` = jingle; `Main` {startMs,endMs} (ad-free coordinates, jingle included); `Remote` = ad break, `urlsInPriorityOrder[0]` has `adMarkerId=`. `fullTitleDurationMs` = ad-free length incl. jingle.
+- `/cdp/getVideoAds?adMarkerId=M` -> `playlist[].description.duration` "HH:MM:SS.fff".
+- `/playback/pes/UpdateSession` request body `streamInfo.vodProgressInfo.currentProgressTime` (ISO) = real position, sent on play/pause/seek and every ~3 min.
+- On-screen ad timer: `.atvwebplayersdk-ad-timer-remaining-time` (also `.atvwebplayersdk-adtimeindicator-text`).
+- Episodes share one detail page URL: titles are identified by the GTI of the active playback request (picked by `video.duration - full` in [-2s, 900s]).
+
+## Design
+- `src/bridge-prime.js`: manifest content script, `world: MAIN`, `document_start` (its fetch/XHR hooks must see the playlist request). Program ms = currentTime - (jingle + ads behind) + calibration from the last UpdateSession anchor. Ads the playlist missed but the on-screen timer showed are recorded in video time. Seek inverts the mapping (fixed-point) and sets `video.currentTime`; play/pause call the video. Posts the same `{hwp:'state'}` shape as bridge.js plus `title` (GTI).
+- player.js injects bridge.js on disneyplus.com only; carries `title`.
+- sync.js: messages carry `title`; `sameTitle(msg)` compares player titles when both known, never matches across sites; `followHost` is Disney-to-Disney only; a title change on the same page (Prime autoplay) resets the baseline and the host re-syncs.
+- Side panel: "Open Disney+" + "Open Prime Video". Name "Watch Party (Hunty)", v3.2.0.
+
+## Status
+- [x] bridge-prime.js, player/sync/site-aware, manifest, side panel, README, updater text.
+- [x] tests: `tests/test-prime.html` (real `<video>` `tests/prime.webm`, fake playback/ads/session endpoints in run.mjs). Scenario 7: mapping, in-ad freeze + time left, seek across the break, anchor calibration, screen-only ad, 2-party play/seek/pause, both into the same break and resume, other-episode guest left alone. `node tests/run.mjs`: ALL 37 PASS (incl. 7.3b: next-episode prefetch must not take over the playing title; titles lock to the video stream).
+- [x] Real Chrome (temp headless profile): extension loads, bridge-prime injects on primevideo.com and amazon.com/gp/video, isolated scripts connect to background, Disney still gets bridge.js.
+- [ ] Live check on a real Prime title with a signed-in account: position matches the on-screen clock, `video.currentTime` seeks land (Dreamlinerm notes very large jumps during ads can stall the player), ad flow on the ad plan. Debug: `window.__hwpBridge.last` / `.titles` in the page's DevTools console.
+

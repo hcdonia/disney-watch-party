@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Disney Watch Party (Hunty)",
-  "version": "3.1.0",
-  "description": "Watch Disney+ in sync with friends far away. Chat, GIFs and reactions in the side panel. Free, no account.",
+  "name": "Watch Party (Hunty)",
+  "version": "3.2.0",
+  "description": "Watch Disney+ or Prime Video in sync with friends far away. Chat, GIFs and reactions in the side panel. Free, no account.",
   "permissions": [
     "sidePanel",
     "storage"
@@ -14,7 +14,7 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Disney Watch Party",
+    "default_title": "Watch Party",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png",
@@ -24,7 +24,24 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.disneyplus.com/*"
+        "*://*.primevideo.com/*",
+        "*://*.amazon.com/gp/video/*",
+        "*://*.amazon.com/dp/*",
+        "*://*.amazon.com/*/dp/*"
+      ],
+      "js": [
+        "src/bridge-prime.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://*.disneyplus.com/*",
+        "*://*.primevideo.com/*",
+        "*://*.amazon.com/gp/video/*",
+        "*://*.amazon.com/dp/*",
+        "*://*.amazon.com/*/dp/*"
       ],
       "js": [
         "peerjs.min.js",

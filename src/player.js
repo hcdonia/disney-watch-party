@@ -1,12 +1,14 @@
-// Disney Watch Party: player adapter (isolated world). Injects src/bridge.js into the page, turns its
-// window.postMessage reports into HWP.bus events, and sends it play/pause/seek commands.
+// Watch Party: player adapter (isolated world). Turns the page bridge's window.postMessage reports into
+// HWP.bus events and sends it play/pause/seek commands. Disney+: injects src/bridge.js into the page.
+// Prime Video: src/bridge-prime.js is a main-world content script of its own (manifest), nothing to inject.
 //
-// Everything here is Disney+ PROGRAM time in milliseconds (mediaPlayer.timeline.info.playheadPositionMs),
-// never <video>.currentTime (not program time on Disney+; see PLAN.md v3 facts).
+// Everything here is PROGRAM time in milliseconds (Disney+: the player's playheadPositionMs; Prime: the
+// bridge's ad-free position), never raw <video>.currentTime (see PLAN.md v3 and v4 facts).
 //
 // Bus: 'player:ready' (player found), 'player:gone' (lost; SPA navigation), 'player:state' (s) every ~250ms,
-//      s = { ms, durMs, status, playing, ad, adLeftMs, breaks: [ms], v, at } (at = when we received it).
-// API: HWP.player = { ready(), ms(), playing(), ad(), adLeftMs(), seek(ms), play(), pause(),
+//      s = { ms, durMs, status, playing, ad, adLeftMs, breaks: [ms], v, title, at } (at = when we received it;
+//      title = the site's own id for what is playing, or null when the bridge can't tell).
+// API: HWP.player = { ready(), ms(), playing(), ad(), adLeftMs(), title(), seek(ms), play(), pause(),
 //                     last, lastCmd: {op, ms, at}, lastCmds: {seek, play, pause} }
 // lastCmd / lastCmds let sync.js tell the state changes it caused from the ones a person caused.
 (() => {
@@ -24,6 +26,7 @@
   function inject() {
     try {
       if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.getURL !== 'function') return;
+      if (!/(^|\.)disneyplus\.com$/.test(location.hostname)) return;
       if (document.querySelector('script[data-hwp-bridge]')) return;
       const s = document.createElement('script');
       s.src = chrome.runtime.getURL('src/bridge.js');
@@ -45,6 +48,7 @@
       adLeftMs: num(d.adLeftMs),
       breaks: Array.isArray(d.breaks) ? d.breaks.map(num).filter((x) => x != null).slice(0, 50) : [],
       v: num(d.v),
+      title: typeof d.title === 'string' && d.title ? d.title.slice(0, 64) : null,
       at: Date.now(),
     };
   }
@@ -91,6 +95,7 @@
     playing: () => !!(P.last && P.last.playing),
     ad: () => !!(P.last && P.last.ad),
     adLeftMs: () => (P.last ? P.last.adLeftMs : null),
+    title: () => (P.last ? P.last.title : null),
     seek(ms) { const n = num(ms); return n == null ? false : cmd('seek', n); }, // MILLISECONDS
     play: () => cmd('play'),
     pause: () => cmd('pause'),

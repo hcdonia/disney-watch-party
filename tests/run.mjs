@@ -1,12 +1,28 @@
-// v3 end-to-end harness: 2-3 headless pages over the real public PeerJS server, fake Disney+ player.
+// End-to-end harness: 2-3 headless pages over the real public PeerJS server. Scenarios 1-6 use a fake
+// Disney+ player (tests/test.html), 7 a fake Prime Video page (tests/test-prime.html, real <video>).
 // Run: node tests/run.mjs
 import { chromium } from '/Users/hunterdonia/Documents/Coding Projects/Hunter Donia Website/node_modules/playwright/index.mjs';
 import http from 'http'; import fs from 'fs'; import path from 'path'; import { fileURLToPath } from 'url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const URL_ = 'http://localhost:4747/tests/test.html';
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.mp4': 'video/mp4', '.css': 'text/css' };
+const PRIME_URL = 'http://localhost:4747/tests/test-prime.html';
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.mp4': 'video/mp4', '.webm': 'video/webm', '.css': 'text/css' };
+// Prime's player requests, answered in Prime's shapes (PLAN.md v4). 50s ad-free (6s jingle + 44s title),
+// one 10s break after 14s of title, so the 60s test video is: jingle, title, ad, title.
+const PRIME_PLAYBACK = { vodPlaylistedPlaybackUrls: { result: { playbackUrls: { fullTitleDurationMs: 50000, intraTitlePlaylist: [
+  { type: 'Jingle', startMs: 0, endMs: 6000 },
+  { type: 'Main', startMs: 6000, endMs: 20000 },
+  { type: 'Remote', urlsInPriorityOrder: ['https://ads.example/x?adMarkerId=M1&pod=1'] },
+  { type: 'Main', startMs: 20000, endMs: 50000 },
+] } } } };
+const PRIME_ADS = { playlist: [{ description: { duration: '00:00:06.000' } }, { description: { duration: '00:00:04.000' } }] };
 const srv = http.createServer((req, res) => {
+  if (req.url.startsWith('/fake-prime/')) {
+    const body = /GetVodPlaybackResources/.test(req.url) ? PRIME_PLAYBACK : /getVideoAds/.test(req.url) ? PRIME_ADS : {};
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify(body));
+  }
   const f = path.join(root, decodeURIComponent(req.url.split('?')[0]));
   if (!f.startsWith(root) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
   const size = fs.statSync(f).size, ct = types[path.extname(f)] || 'application/octet-stream';
@@ -38,10 +54,10 @@ const connected = (p) => p.evaluate(() => !!HWP.state.connected);
 const gotMsg = (p, pred) => p.evaluate((src) => window.__hwpEvents.some((e) => e.name === 'net:message' && (new Function('m', 'return (' + src + ')(m)'))(e.payload)), pred.toString());
 const waitingNames = (p) => p.evaluate(() => { const l = window.__hwpEvents.filter((e) => e.name === 'sync:waiting'); const all = new Set(); l.forEach((e) => ((e.payload && e.payload.names) || []).forEach((n) => all.add(n))); return [...all]; });
 
-async function newPage(browser) {
+async function newPage(browser, url = URL_) {
   const p = await browser.newPage();
   p.on('pageerror', (e) => console.log('  [pageerror]', e.message));
-  await p.goto(URL_);
+  await p.goto(url);
   await p.waitForFunction(() => window.HWP && HWP.net && HWP.sync && HWP.player, null, { timeout: 10000 });
   return p;
 }
@@ -60,6 +76,7 @@ const sendChat = (p, text) => p.evaluate((t) => HWP.net.send({ type: 'chat', tex
 const hasChat = (p, text) => gotMsg(p, `(m) => m && m.type === 'chat' && JSON.stringify(m).includes(${JSON.stringify(text)})`);
 
 async function scenario(name, fn) {
+  if (process.env.HWP_ONLY && !name.startsWith(process.env.HWP_ONLY)) return; // e.g. HWP_ONLY=7 node tests/run.mjs
   try { await fn(); } catch (e) { report(name, false, 'threw: ' + e.message); }
 }
 
@@ -206,6 +223,112 @@ async function sameBreak(browser) {
   } finally { await host.close(); await guest.close(); }
 }
 
+// ---------- Prime Video ----------
+const primePage = (browser, q = '') => newPage(browser, PRIME_URL + q);
+const pMs = (p) => p.evaluate(() => HWP.player.ms());
+const pLast = (p) => p.evaluate(() => HWP.player.last);
+const pV = (p) => p.evaluate(() => window.__v());
+const pSetV = (p, t) => p.evaluate((t) => window.__setV(t), t);
+const pPlaying = (p) => p.evaluate(() => !document.getElementById('v').paused);
+const pPlay = (p) => p.evaluate(() => document.getElementById('v').play());
+const pPause = (p) => p.evaluate(() => document.getElementById('v').pause());
+const near = (a, b, tol) => a != null && b != null && Math.abs(a - b) <= tol;
+// Let the video settle at t (a seek lands, a report arrives) before reading program ms.
+async function pAt(p, t) { await pSetV(p, t); await waitFor(async () => near(await pV(p), t, 0.3) && near((await pLast(p) || {}).v, t, 0.6), 3000); await sleep(300); }
+
+async function primeTimeline(browser) {
+  const p = await primePage(browser);
+  try {
+    await waitFor(async () => { const l = await pLast(p); return l && l.title === 'GTI1' && l.durMs === 44000; }, 5000);
+    const l0 = await pLast(p);
+    report('7.1 reads the title id, length without ads, break', !!l0 && l0.title === 'GTI1' && l0.durMs === 44000 && JSON.stringify(l0.breaks) === '[14000]', JSON.stringify(l0 && { title: l0.title, durMs: l0.durMs, breaks: l0.breaks }));
+    await pAt(p, 12);
+    const before = await pMs(p);
+    await pAt(p, 40);
+    const after = await pMs(p);
+    report('7.2 video time -> program time skips the jingle and the ad', near(before, 6000, 300) && near(after, 24000, 300), `v12=${before} v40=${after} (want 6000, 24000)`);
+    await pAt(p, 25);
+    const l1 = await pLast(p);
+    report('7.3 inside the ad: ad flagged, position frozen at the break, time left', l1.ad && near(l1.ms, 14000, 300) && near(l1.adLeftMs, 5000, 600), `ad=${l1.ad} ms=${l1.ms} left=${l1.adLeftMs}`);
+    // Near the end of an episode Prime prefetches the next one: the playing title must not switch.
+    await p.evaluate(() => fetch('/fake-prime/playback/prs/GetVodPlaybackResources?titleId=GTI9'));
+    await sleep(800);
+    const l2 = await pLast(p);
+    report('7.3b next-episode prefetch does not take over the playing title', l2.title === 'GTI1', `title=${l2.title}`);
+    await p.evaluate(() => HWP.player.seek(30000));
+    await waitFor(async () => near(await pV(p), 46, 0.3), 3000);
+    report('7.4 seek to program 30s lands at video 46s (jingle + ad added back)', near(await pV(p), 46, 0.3), `v=${(await pV(p)).toFixed(2)}`);
+  } finally { await p.close(); }
+}
+
+async function primeFallback(browser) {
+  const p = await primePage(browser, '?noplaylist=1');
+  try {
+    await waitFor(async () => !!(await pLast(p)), 5000);
+    await pAt(p, 10);
+    await p.evaluate(() => window.__primeSession(4)); // Prime says: program 4s at video 10s
+    await sleep(400);
+    const a = await pMs(p);
+    await pAt(p, 15);
+    const b = await pMs(p);
+    report('7.5 no playlist seen: the UpdateSession anchor calibrates', near(a, 4000, 300) && near(b, 9000, 300), `v10=${a} v15=${b} (want 4000, 9000)`);
+    // An ad the playlist never told us about: the on-screen timer freezes the position, and it stays right after.
+    await p.evaluate(() => window.__screenAd(true, '0:05'));
+    await pPlay(p);
+    await sleep(2500);
+    const l = await pLast(p);
+    await p.evaluate(() => window.__screenAd(false));
+    await pPause(p);
+    await sleep(400);
+    const vEnd = await pV(p), after = await pMs(p);
+    report('7.6 on-screen-only ad: flagged, frozen, then position excludes it', l.ad && near(l.ms, 9000, 400) && near(after, 9000, 500) && vEnd > 16.5, `ad=${l.ad} during=${l.ms} after=${after} v=${vEnd.toFixed(2)} left=${l.adLeftMs}`);
+  } finally { await p.close(); }
+}
+
+async function primeParty(browser) {
+  const host = await primePage(browser), guest = await primePage(browser);
+  try {
+    await waitFor(async () => (await pLast(host) || {}).title === 'GTI1' && (await pLast(guest) || {}).title === 'GTI1', 5000);
+    const code = await startHost(host, 'Hunter');
+    const ok = await joinGuest(guest, 'Pal', code);
+    report('7.7 prime connect', ok, `code=${code}`);
+    if (!ok) return;
+    await pAt(host, 8);
+    await pPlay(host);
+    report('7.8 prime host play -> guest playing', await waitFor(() => pPlaying(guest), 3000), `guest=${await pPlaying(guest)}`);
+    await pSetV(host, 40); // the host scrubs past the ad: program 24s
+    const seekOk = await waitFor(async () => near(await pMs(guest), await pMs(host), 1500) && (await pMs(guest)) > 23000, 4000);
+    report('7.9 prime host seek -> guest at the same program time', seekOk, `host=${await pMs(host)} guest=${await pMs(guest)} guestV=${(await pV(guest)).toFixed(2)}`);
+    await pPause(guest);
+    report('7.10 prime guest pause -> host pauses', await waitFor(async () => !(await pPlaying(host)), 3000), `host=${await pPlaying(host)}`);
+    // Both run into the ad break together: the room waits once and resumes in step.
+    await pSetV(host, 17); // program 11s, 3s before the break
+    await waitFor(async () => near(await pMs(guest), 11000, 1500), 4000);
+    await pPlay(host);
+    const bothAd = await waitFor(async () => (await pLast(host)).ad && (await pLast(guest)).ad, 7000);
+    report('7.11 prime: both reach the ad break', bothAd, `hostAd=${(await pLast(host)).ad} guestAd=${(await pLast(guest)).ad}`);
+    const resumed = await waitFor(async () => {
+      const h = await pLast(host), g = await pLast(guest);
+      return !h.ad && !g.ad && (await pPlaying(host)) && (await pPlaying(guest)) && near(h.ms, g.ms, 1500) && h.ms > 14000;
+    }, 16000);
+    report('7.12 prime: after the ad both play on together', resumed, `host=${await pMs(host)} guest=${await pMs(guest)} hp=${await pPlaying(host)} gp=${await pPlaying(guest)}`);
+  } finally { await host.close(); await guest.close(); }
+}
+
+// A guest on a different episode (Prime can't follow by URL) is left alone.
+async function primeOtherEpisode(browser) {
+  const host = await primePage(browser), guest = await primePage(browser, '?gti=GTI2');
+  try {
+    await waitFor(async () => (await pLast(host) || {}).title === 'GTI1' && (await pLast(guest) || {}).title === 'GTI2', 5000);
+    const code = await startHost(host, 'Hunter');
+    if (!(await joinGuest(guest, 'Pal', code))) return report('7.13 connect', false);
+    await pAt(guest, 10);
+    await pAt(host, 45);
+    await sleep(5000); // past a host tick
+    report('7.13 prime: a guest on another episode is not seeked', near(await pV(guest), 10, 0.5), `guestV=${(await pV(guest)).toFixed(2)}`);
+  } finally { await host.close(); await guest.close(); }
+}
+
 let browser;
 const started = Date.now();
 try {
@@ -217,6 +340,10 @@ try {
   await scenario('4 room waits', () => roomWaits(browser));
   await scenario('5 reactions', () => reactions(browser));
   await scenario('6 same break', () => sameBreak(browser));
+  await scenario('7a prime timeline', () => primeTimeline(browser));
+  await scenario('7b prime fallback', () => primeFallback(browser));
+  await scenario('7c prime party', () => primeParty(browser));
+  await scenario('7d prime other episode', () => primeOtherEpisode(browser));
 } finally {
   if (browser) await browser.close();
   srv.close();
