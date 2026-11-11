@@ -205,6 +205,7 @@
         if ((mode !== 'everyone' && mode !== 'host') || HWP.state.role !== 'host') { postState(); return false; }
         if (HWP.state.controlMode === mode) { postState(); return true; }
         HWP.state.controlMode = mode;
+        if (HWP.session) safe(() => HWP.session.save());
         safe(() => HWP.net.send({ type: 'control', mode }), 'send failed');
         sys(mode === 'host' ? 'Only you can play, pause or skip now' : 'Anyone can play, pause or skip now');
         postState();
@@ -377,12 +378,15 @@
   function onMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
     const who = cleanName(msg.from) || 'Someone';
+    // A replayed line (host catching us up after a (re)join) we already have: skip it.
+    const seen = (mid) => !!cleanMid(mid) && log.some((l) => l.mid === cleanMid(mid) && (l.kind === 'chat' || l.kind === 'gif'));
+    if ((msg.type === 'chat' || msg.type === 'gif') && seen(msg.mid)) return;
     if (msg.type === 'chat' && typeof msg.text === 'string' && msg.text.trim()) {
       addChat(who, msg.text.trim().slice(0, 500), false, msg.mid);
-      bumpUnread();
+      if (!msg.replay) bumpUnread();
     } else if (msg.type === 'gif' && gifUrl(msg.url)) {
       addGif(who, gifUrl(msg.url), gifDim(msg.w), gifDim(msg.h), false, msg.mid);
-      bumpUnread();
+      if (!msg.replay) bumpUnread();
     } else if (msg.type === 'msg-react' && cleanMid(msg.mid) && EMOJIS.includes(msg.emoji)) {
       toggleReact(cleanMid(msg.mid), msg.emoji, who, !!msg.on);
     } else if (msg.type === 'reaction' && EMOJIS.includes(msg.emoji)) { // whitelist: no arbitrary text floats

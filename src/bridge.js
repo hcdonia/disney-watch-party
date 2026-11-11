@@ -26,14 +26,16 @@
   const POST_MS = 250;      // state cadence
   const FIND_MS = 500;      // retry cadence while the player is missing
   const BADGE_FIND_MS = 1000;
+const BADGE_FIND_SLOW_MS = 5000; // after many misses (ad-free plan): look less often, the deep walk is not free
+const STALL_SAMPLES = 2;  // the stall-only ad verdict must hold this many samples in a row
   const STALL_MS = 1500;    // playhead frozen this long while PLAYING...
   const STALL_V_S = 1;      // ...and <video> advanced more than this many seconds => an ad is playing
   const TAG = '[WatchParty bridge]';
 
   let host = null, mp = null, found = false, lastFind = 0;
-  let badge = null, lastBadgeFind = 0, loggedBadge = false;
+  let badge = null, lastBadgeFind = 0, loggedBadge = false, badgeMisses = 0;
   const loggedKeySets = new Set();
-  let stallMs = null, stallSince = 0, stallVAdv = 0, lastV = null; // ad-stall detector
+  let stallMs = null, stallSince = 0, stallVAdv = 0, lastV = null, stallHits = 0; // ad-stall detector
   let errLogged = 0;
 
   const now = () => Date.now();
@@ -93,9 +95,10 @@
   function findBadge() {
     if (badge && badge.isConnected) return badge;
     badge = null;
-    if (now() - lastBadgeFind < BADGE_FIND_MS) return null;
+    if (now() - lastBadgeFind < (badgeMisses >= 10 ? BADGE_FIND_SLOW_MS : BADGE_FIND_MS)) return null;
     lastBadgeFind = now();
     badge = document.querySelector('ad-badge-overlay') || deepFind(host || document, 'ad-badge-overlay', { n: 4000 });
+    badgeMisses = badge ? 0 : badgeMisses + 1;
     if (badge && !loggedBadge) {
       loggedBadge = true;
       let ls = null;
@@ -150,14 +153,20 @@
     try { return parseClock(deepText(b)); } catch (_) { return null; }
   }
 
-  function resetStall() { stallMs = null; stallSince = 0; stallVAdv = 0; lastV = null; }
+  function resetStall() { stallMs = null; stallSince = 0; stallVAdv = 0; lastV = null; stallHits = 0; }
   // Ad heuristic for when the badge is missing: PLAYING, playhead frozen >= 1.5s, video advanced > 1s.
   // Video advance is summed over small positive steps, so a currentTime reset at the ad's start can't hide it.
+  // Only counts time spent PLAYING (Disney+ reports PLAYING during ads): a BUFFERING / PAUSED / SEEKING
+  // stretch used to keep the timer running, so the first PLAYING sample after it looked like an ad and
+  // paused the whole room. Hidden tabs throttle the page, so the playhead can look frozen there: no verdict.
   function stalled(ms, status, v, t) {
-    if (ms !== stallMs) { stallMs = ms; stallSince = t; stallVAdv = 0; }
+    if (status !== 'PLAYING' || document.hidden) { resetStall(); stallMs = ms; stallSince = t; lastV = v; return false; }
+    if (ms !== stallMs) { stallMs = ms; stallSince = t; stallVAdv = 0; stallHits = 0; }
     else if (v != null && lastV != null) { const dv = v - lastV; if (dv > 0 && dv < 2) stallVAdv += dv; }
     lastV = v;
-    return status === 'PLAYING' && ms != null && t - stallSince >= STALL_MS && stallVAdv > STALL_V_S;
+    const hit = ms != null && t - stallSince >= STALL_MS && stallVAdv > STALL_V_S;
+    stallHits = hit ? stallHits + 1 : 0;
+    return stallHits >= STALL_SAMPLES;
   }
 
   function readBreaks() {

@@ -337,6 +337,30 @@ async function primeOtherEpisode(browser) {
   } finally { await host.close(); await guest.close(); }
 }
 
+// The ad-loop case: a guest already past the break must not be sent back to just before it (that replays the ad).
+async function primeNoRewatch(browser) {
+  const host = await primePage(browser), guest = await primePage(browser);
+  try {
+    await waitFor(async () => (await pLast(host) || {}).title === 'GTI1' && (await pLast(guest) || {}).title === 'GTI1', 5000);
+    // Positions first (a catch-up, not a person seeking): seeks made in a party are deliberate and honored.
+    await pAt(guest, 33);           // guest: program 17s, the break (14s) and its ad already behind
+    await pAt(host, 17);            // host: program 11s, 3s before the break
+    const code = await startHost(host, 'Hunter');
+    if (!(await joinGuest(guest, 'Pal', code))) return report('7.14 connect', false);
+    await sleep(1500);
+    await guest.evaluate(() => { window.__guestAds = 0; HWP.bus.on('sync:ad', (e) => { if (e.who === 'me' && e.on) window.__guestAds++; }); });
+    await pPlay(host);
+    await sleep(9000);              // host ticks arrive, host plays into its own ad
+    const gAds = await guest.evaluate(() => window.__guestAds), gV = await pV(guest);
+    report('7.14 prime: guest past the break is held, never rewound into the ad', gAds === 0 && gV >= 29.5, `guestAds=${gAds} guestV=${gV.toFixed(2)}`);
+    const together = await waitFor(async () => {
+      const h = await pLast(host), g = await pLast(guest);
+      return !h.ad && (await pPlaying(host)) && (await pPlaying(guest)) && near(h.ms, g.ms, 1500) && h.ms > 14000;
+    }, 16000);
+    report('7.15 prime: after the host\'s ad both play on together', together && (await guest.evaluate(() => window.__guestAds)) === 0, `host=${await pMs(host)} guest=${await pMs(guest)}`);
+  } finally { await host.close(); await guest.close(); }
+}
+
 let browser;
 const started = Date.now();
 try {
@@ -352,6 +376,7 @@ try {
   await scenario('7b prime fallback', () => primeFallback(browser));
   await scenario('7c prime party', () => primeParty(browser));
   await scenario('7d prime other episode', () => primeOtherEpisode(browser));
+  await scenario('7e prime no rewatch', () => primeNoRewatch(browser));
 } finally {
   if (browser) await browser.close();
   srv.close();

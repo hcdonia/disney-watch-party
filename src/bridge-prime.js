@@ -48,7 +48,7 @@
   let activeGti = null;
   let srcKey = null, srcGti = null; // the title locked to the current video stream (see pickTitle)
   let observed = [];              // ads seen on screen that the playlist didn't cover: [{vs, a}] in video seconds
-  let domAdStart = null, lastDomV = null;
+  let domAdStart = null, lastDomV = null, wroteAt = 0; // wroteAt: when we last set currentTime ourselves
   let vid = null, found = false, errLogged = 0;
 
   const now = () => Date.now();
@@ -105,6 +105,16 @@
     for (const ad of json.playlist) { const s = clockSeconds(ad && ad.description && ad.description.duration); if (s) total += s; }
     adDurations.set(marker, total);
     for (const t of titles.values()) for (const b of t.breaks) if (b.marker === marker) b.a = total;
+    // The on-screen timer may have recorded this same ad before its length arrived: don't count it twice.
+    const st = activeGti ? titles.get(activeGti) : null;
+    if (st && observed.length) {
+      let ads = 0;
+      for (const b of st.breaks) {
+        const start = b.cue + ads; // video time where this break starts (cue counts the jingle, not the ads)
+        if (b.marker === marker && b.a > 0) observed = observed.filter((o) => o.vs + o.a < start - 2 || o.vs > start + b.a + 2);
+        ads += b.a > 0 ? b.a : 0;
+      }
+    }
   }
 
   // Read at request time, so currentTime and the reported position are from the same moment.
@@ -115,6 +125,8 @@
     const v = pickVideo();
     pickTitle();
     if (cp == null || !v) return;
+    // Around a seek the report can carry the old position: an anchor from then would mis-calibrate by the whole jump.
+    if (v.seeking || now() - wroteAt < 2000) return;
     const ct = v.currentTime, gap = ct - cp;
     if (!(gap >= -1 && gap <= MAX_OFFSET_S)) return;
     const st = activeGti ? titles.get(activeGti) : null;
@@ -191,6 +203,7 @@
     const fits = (g) => { const t = titles.get(g), f = t && t.full; return hasDur && f != null && v.duration - f >= -DURATION_TOL_S && v.duration - f <= MAX_TITLE_ADS_S; };
     let pick;
     if (key && key === srcKey && titles.has(srcGti) && fits(srcGti)) pick = srcGti;
+    else if (!hasDur && activeGti && titles.has(activeGti)) pick = activeGti; // stream reloading: keep what we had
     else {
       const ids = [...titles.keys()].reverse();
       pick = ids.find(fits) || ids[0] || null;
@@ -237,10 +250,21 @@
   // never goes backwards as video time grows.
   function videoTimeFor(st, p) {
     const program = (ct) => ct - totalOffset(st, ct).offset;
+    const goal = p + 0.001; // rounding must never land a hair before an ad we meant to skip
     let lo = p, hi = p + MAX_OFFSET_S + 1;
     for (let i = 0; i < 40; i++) {
       const mid = (lo + hi) / 2;
-      if (program(mid) <= p) lo = mid; else hi = mid;
+      if (program(mid) <= goal) lo = mid; else hi = mid;
+    }
+    // Landing right at an ad's end: the real ad can run a little longer than its listed length. Step clear.
+    if (st) {
+      let ads = 0;
+      for (const b of st.breaks) {
+        if (!(b.a > 0)) continue;
+        const end = b.cue + ads + b.a;
+        if (lo >= end - 0.05 && lo < end + 1) { lo = end + 0.3; break; }
+        ads += b.a;
+      }
     }
     return lo;
   }
@@ -249,10 +273,13 @@
   function domAd() {
     for (const el of document.querySelectorAll(AD_TIMER_SEL)) {
       let shown = false;
-      try { shown = typeof el.checkVisibility === 'function' ? el.checkVisibility() : el.offsetParent !== null; } catch (_) {}
+      // Faded out (opacity / visibility) counts as gone too, and it must show a real countdown: a leftover
+      // empty or frozen timer element must not keep the whole room "in an ad".
+      try { shown = typeof el.checkVisibility === 'function' ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : el.offsetParent !== null; } catch (_) {}
       if (!shown) continue;
       const m = /(\d{1,2}):(\d{2})(?!\d)/.exec(el.textContent || '');
-      return { leftMs: m ? (Number(m[1]) * 60 + Number(m[2])) * 1000 : null };
+      if (!m) continue;
+      return { leftMs: (Number(m[1]) * 60 + Number(m[2])) * 1000 };
     }
     return null;
   }
@@ -277,7 +304,13 @@
 
       // An ad on screen the playlist didn't predict: remember it in video time so the position holds still.
       if (screenAd && !tl.inAd) {
-        if (domAdStart == null || ct < lastDomV - 1) { domAdStart = ct; observed.push({ vs: ct, a: 0 }); }
+        if (domAdStart == null || ct < lastDomV - 1) {
+          domAdStart = ct;
+          // Replaying an ad we already recorded: extend that one, never stack a second copy.
+          const again = observed.find((x) => ct >= x.vs - 1 && ct <= x.vs + x.a + 1);
+          if (again) { observed.splice(observed.indexOf(again), 1); observed.push(again); }
+          else observed.push({ vs: ct, a: 0 });
+        }
         const o = observed[observed.length - 1];
         o.a = Math.max(o.a, ct - o.vs);
         lastDomV = ct;
@@ -291,7 +324,7 @@
       else if (Number.isFinite(v.duration)) durMs = Math.round((v.duration - off.offset) * 1000);
       const adLeftMs = !ad ? null : off.adLeft != null ? Math.round(off.adLeft * 1000) : screenAd ? screenAd.leftMs : null;
       const playing = !v.paused && !v.ended;
-      const status = v.seeking ? 'SEEKING' : !playing ? 'PAUSED' : v.readyState < 3 ? 'BUFFERING' : 'PLAYING';
+      const status = v.ended ? 'ENDED' : v.seeking ? 'SEEKING' : !playing ? 'PAUSED' : v.readyState < 3 ? 'BUFFERING' : 'PLAYING';
       const breaks = st ? st.breaks.map((b) => Math.round((b.cue - st.intro) * 1000)).filter((b) => b >= 0).slice(0, 50) : [];
 
       const msg = { hwp: 'state', ms, durMs, status, playing, ad, adLeftMs, breaks, v: ct, title: activeGti };
@@ -316,6 +349,7 @@
         const st = activeGti ? titles.get(activeGti) : null;
         let ct = videoTimeFor(st, ms / 1000);
         if (Number.isFinite(v.duration) && v.duration > 2) ct = Math.min(ct, v.duration - 1);
+        wroteAt = now();
         v.currentTime = Math.max(0, ct);
       } else if (d.op === 'play') quiet(v.play());
       else if (d.op === 'pause') v.pause();

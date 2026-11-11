@@ -443,7 +443,9 @@
     if (page === 'loading') { panel.dataset.state = 'loading'; mount([el.loadStatus]); return; }
     if (page === 'none') { panel.dataset.state = 'off'; mount(el.noPage); return; }
     const st = viewState();
-    const s = st.state;
+    let s = st.state;
+    // Host whose last guest dropped for a moment: keep the chat on screen (it says who we wait for), not the code page.
+    if (s === 'hosting' && model.state.role === 'host' && el.chat.childElementCount > 0) s = 'reconnecting';
     const code = st.code || model.state.code || '';
     panel.dataset.state = s;
     el.codeText.textContent = code;

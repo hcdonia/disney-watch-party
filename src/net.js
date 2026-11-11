@@ -5,10 +5,12 @@
   if (!window.HWP || HWP.net) return;
 
   const PREFIX = 'hunty-watch-party-';
-  const HOST_ID_RETRIES = 5;          // A3: re-claim our id after a reload
-  const HOST_ID_RETRY_MS = 2000;
-  const RETRY_MS = 3000;              // A2: guest reconnect cadence
-  const RECONNECT_WINDOW_MS = 2 * 60 * 1000;
+  const HOST_ID_RETRIES = 40;         // A3: re-claim our id after a reload. A crashed tab's id can stay
+  const HOST_ID_RETRY_MS = 2000;      //     held on the server ~60s, so keep trying ~80s before giving up.
+  const RETRY_MS = 3000;              // A2: guest reconnect cadence for the first minute...
+  const RETRY_SLOW_MS = 15000;        // ...then this (a host's laptop asleep for a while)
+  const RECONNECT_WINDOW_MS = 30 * 60 * 1000; // a guest keeps waiting for the host this long
+  const HISTORY = 20;                 // host: recent chat / gifs replayed to someone (re)joining
   const ATTEMPT_TIMEOUT_MS = 15000;   // one connect attempt that never opens
   const SIGNAL_RETRY_MS = 2000;       // re-attach to the signaling server
   const MAX_MSG_CHARS = 10 * 1024;
@@ -26,6 +28,7 @@
   let everConnected = false;  // guest: true => a dropped link means "reconnect", not "fail"
   let lostAt = 0;             // guest: when the host link dropped
   let hostTries = 0;
+  let recent = [];            // host: last HISTORY chat/gif messages, as sent (from/sentAt/mid kept)
   const timers = {};
   let lastStatus = { state: 'idle', code: null, peerCount: 0 };
 
@@ -34,7 +37,10 @@
   function stop(key) { clearTimeout(timers[key]); timers[key] = null; }
   function session(op) { try { if (HWP.session) HWP.session[op](); } catch (_) {} }
   const normCode = (c) => String(c == null ? '' : c).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const cleanName = (n) => (typeof n === 'string' ? n.trim().slice(0, 40) : '') || 'Someone';
+  // "You" is how everyone's own lines and reactions are labeled: a person called that would look like us.
+  const cleanName = (n) => { const s = (typeof n === 'string' ? n.trim().slice(0, 40) : '') || 'Someone'; return /^you$/i.test(s) ? 'Friend' : s; };
+  function remember(msg) { if (msg && (msg.type === 'chat' || msg.type === 'gif')) { recent.push(msg); if (recent.length > HISTORY) recent.shift(); } }
+  const retryMs = () => (lostAt && Date.now() - lostAt > 60000 ? RETRY_SLOW_MS : RETRY_MS);
   const myName = () => cleanName(S.name);
   const stamp = (msg) => Object.assign({}, msg, { from: myName(), sentAt: Date.now() });
 
@@ -83,7 +89,7 @@
     for (const k in timers) stop(k);
     const p = peer;
     const conns = [...guests.values()].map((g) => g.conn).concat(hostConn || []);
-    peer = null; peerOpened = false; hostConn = null; guests.clear();
+    peer = null; peerOpened = false; hostConn = null; guests.clear(); recent = [];
     role = null; code = null; everConnected = false; lostAt = 0;
     S.role = null; S.code = null; S.connected = false;
     if (S.peerNames && S.peerNames.length) setPeerNames([]);
@@ -133,7 +139,9 @@
         } else fail(friendly(type));
         return;
       }
-      // Once live, signaling hiccups or one guest's failed handshake never end the party.
+      // Once live, signaling hiccups or one guest's failed handshake never end the party. A fatal error
+      // destroys the peer though (nobody could join any more): start it again under the same code.
+      if (peerOpened && p.destroyed) { peer = null; hostTries = 0; status('hosting', 'Reconnecting your party...'); later('hostId', HOST_ID_RETRY_MS, startHostPeer); return; }
       if (peerOpened || type === 'peer-unavailable' || type === 'webrtc') return;
       return fail(friendly(type));
     }
@@ -144,6 +152,7 @@
         return;
       }
       if (!peerOpened) fail(friendly(type));
+      else if (p.destroyed) { peer = null; peerOpened = false; if (!hostConn) later('retry', retryMs(), attempt); } // attempt() makes a new peer
     }
   }
 
@@ -216,9 +225,12 @@
     if (msg.type === 'hello') {
       g.name = cleanName(msg.name);
       rawSend(conn, stamp({ type: 'welcome', names: allNames(), controlMode: S.controlMode }));
+      for (const m of recent) rawSend(conn, Object.assign({}, m, { replay: true })); // catch up on chat (deduped by mid)
       broadcastRoster();
     } else if (!NO_RELAY.has(msg.type)) {
-      // Relay unchanged (original from/sentAt) to everyone except the sender.
+      // Relay with the sender's real name (a guest can't pose as someone else), original sentAt.
+      if (g.name) msg.from = g.name;
+      remember(msg);
       for (const o of guests.values()) if (o.conn !== conn) rawSend(o.conn, msg);
     }
     bus.emit('net:message', msg, conn.peer);
@@ -236,6 +248,9 @@
     everConnected = !!(prev && prev.role === 'guest' && prev.code === next);
     session('save');
     status('joining', 'Joining ' + code + '...');
+    startGuestPeer();
+  }
+  function startGuestPeer() {
     const p = makePeer(null);
     p.on('open', () => {
       if (p !== peer) return;
@@ -248,11 +263,12 @@
   // specific attempt, so overlapping attempts would kill each other.
   function attempt() {
     const p = peer;
-    if (role !== 'guest' || !p || p.destroyed || hostConn) return;
+    if (role !== 'guest' || hostConn) return;
     if (lostAt && Date.now() - lostAt > RECONNECT_WINDOW_MS) return fail('The host left the party.');
-    if (!p.open) return later('retry', RETRY_MS, attempt); // signaling still re-attaching
+    if (!p || p.destroyed) { startGuestPeer(); return later('retry', retryMs(), attempt); } // PeerJS killed it: new one
+    if (!p.open) return later('retry', retryMs(), attempt); // signaling still re-attaching
     const c = p.connect(PREFIX + code, { reliable: true });
-    if (!c) return later('retry', RETRY_MS, attempt);
+    if (!c) return later('retry', retryMs(), attempt);
     hostConn = c;
     later('attempt', ATTEMPT_TIMEOUT_MS, () => { if (c === hostConn && !c.open) linkLost(c); });
     c.on('open', () => {
@@ -285,7 +301,7 @@
     if (!lostAt) lostAt = Date.now();
     if (Date.now() - lostAt > RECONNECT_WINDOW_MS) return fail('The host left the party.');
     status('reconnecting', 'Lost the host. Reconnecting...');
-    later('retry', RETRY_MS, attempt);
+    later('retry', retryMs(), attempt);
   }
 
   function onGuestData(raw, fromId) {
@@ -307,7 +323,7 @@
   // ---------- leave / page lifecycle ----------
   function leave() {
     const tellGuests = role === 'host' && guests.size > 0;
-    // Tell guests it's over so they don't sit in "reconnecting" for 2 minutes.
+    // Tell guests it's over so they don't sit in "reconnecting" waiting for us.
     if (tellGuests) for (const g of guests.values()) rawSend(g.conn, stamp({ type: 'end' }));
     teardown(tellGuests ? 400 : 0); // brief grace so "end" leaves before the links close
     session('clear');
@@ -333,7 +349,7 @@
     send(msg) {
       if (!msg || typeof msg !== 'object') return false;
       const out = stamp(msg);
-      if (role === 'host') { let n = 0; for (const g of guests.values()) if (rawSend(g.conn, out)) n++; return n > 0; }
+      if (role === 'host') { remember(out); let n = 0; for (const g of guests.values()) if (rawSend(g.conn, out)) n++; return n > 0; }
       if (role === 'guest') return rawSend(hostConn, out);
       return false;
     },

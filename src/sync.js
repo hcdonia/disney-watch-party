@@ -42,6 +42,8 @@
   const AD_STALE_MS = 35000;      // a member's ad with no news for this long is forgotten (crashed tab)
   const JOIN_AHEAD_MS = 6000;     // someone's ad began at a break this close ahead of us: play into it too
   const JOIN_SETTLE_MS = 4000;    // ...and give our own ad this long past the break to show up before we pause
+  const AD_MAX_MS = 5 * 60 * 1000;// nobody's ad lasts this long: a stuck ad flag must not hold the room forever
+  const REWATCH_MS = 8000;        // a catch-up target this close before a break we already passed is held, not seeked to
   const NAV_GUARD_MS = 10000, NAV_KEY = 'hwp-nav';
 
   let started = false, timers = [], unsubs = [];
@@ -58,6 +60,7 @@
   let adJoinUntil = 0;            // until then, don't wait-pause: we're running into the same break
   let roomBusy = false;           // anyone in the room (incl. self) in an ad
   let resumeAfter = false;        // host: room was playing when it got busy => resume when it clears
+  let pendingResume = false;      // host: the room cleared while our player wasn't ready / was mid-seek: resume on the next good sample
   // Misc
   let syncTimer = null, lastUrl = location.href, lastPath = location.pathname, lastNetState = null, lastPeers = 0;
   let lastTitle;                  // player's title id from the last sample (undefined before the first)
@@ -101,6 +104,7 @@
   function settledPlaying(s) {
     if (s.status === 'PLAYING') return true;
     if (s.status === 'PAUSED') return false;
+    if (s.status === 'ENDED') return null; // the episode ran out: not a person pausing (autoplay comes next)
     if (!s.status) return s.playing; // unknown player build: trust the flag
     return null;
   }
@@ -180,11 +184,12 @@
     if (!!s.ad !== localAd) setLocalAd(!!s.ad, s.adLeftMs);
     else if (localAd && t >= adRefreshAt) {
       adRefreshAt = t + AD_REFRESH_MS;
-      send({ type: 'ad', on: true, leftMs: s.adLeftMs, ms: s.ms });
+      send({ type: 'ad', on: true, leftMs: s.adLeftMs, ms: s.ms, title: myTitle() });
     }
     detect(s, t);
     prev = s;
     maybeWaitPause();
+    if (pendingResume && settledPlaying(s) != null) resumeRoom();
   }
 
   // ---------- ads + ROOM WAITS ----------
@@ -197,7 +202,7 @@
     const at = ready() ? P().ms() : null; // frozen at the break while the ad plays
     H.log('sync: my ad', on ? 'started' : 'ended');
     H.bus.emit('sync:ad', { on, who: 'me', leftMs: left });
-    send({ type: 'ad', on, leftMs: left, ms: at == null ? null : Math.round(at) });
+    send({ type: 'ad', on, leftMs: left, ms: at == null ? null : Math.round(at), title: myTitle() });
     if (!on) requestSync(); // guests only: catch up with the host
     updateRoom();
   }
@@ -205,7 +210,7 @@
   function setMemberAd(name, on, leftMs, breakMs) {
     if (typeof name !== 'string' || !name) return;
     const was = memberAds.has(name);
-    if (on) memberAds.set(name, { leftMs: num(leftMs), at: now() });
+    if (on) memberAds.set(name, { leftMs: num(leftMs), at: now(), since: was ? memberAds.get(name).since : now() });
     else memberAds.delete(name);
     if (was !== on) H.bus.emit('sync:ad', { on, who: name, leftMs: on ? num(leftMs) : null });
     if (on && !was) maybeJoinAd(breakMs);
@@ -238,7 +243,7 @@
     const t = now();
     for (const [name, a] of [...memberAds]) {
       const gone = keepNames && !keepNames.includes(name);
-      if (gone || t - a.at > AD_STALE_MS) {
+      if (gone || t - a.at > AD_STALE_MS || t - a.since > AD_MAX_MS) {
         memberAds.delete(name);
         H.bus.emit('sync:ad', { on: false, who: name, leftMs: null });
       }
@@ -279,7 +284,10 @@
   // Host: the last ad in the room just ended. Everyone resumes from the host's position.
   function resumeRoom() {
     const p = P();
-    if (!ready()) return;
+    pendingResume = false;
+    if (roomBusy) return; // someone went into an ad again meanwhile
+    // Not ready (tab throttled) or mid-seek (position not settled yet): try again on the next good sample.
+    if (!ready() || settledPlaying(p.last) == null) { pendingResume = true; return; }
     if (!resumeAfter && !p.playing()) return; // the room was paused before the ad: stay paused
     p.play(); // always: the last sample can be 250ms stale (we may have just paused for the wait)
     actionAt = now();
@@ -290,7 +298,7 @@
 
   // Left the party: nobody to wait for. Never touches the player (no resume on leave).
   function clearRoom() {
-    roomBusy = false; resumeAfter = false; waitPaused = false; adJoinUntil = 0;
+    roomBusy = false; resumeAfter = false; waitPaused = false; adJoinUntil = 0; pendingResume = false;
     pruneAds([]);
     updateRoom();
   }
@@ -345,14 +353,33 @@
   // One-way delay, for targets that keep moving (sender was playing).
   function latency(msg) { return typeof msg.sentAt === 'number' ? clamp(now() - msg.sentAt, 0, LATENCY_MAX_MS) : 0; }
 
+  // A break we already played through sits between target and where we are, and target is just short of it.
+  // Seeking back there would play that ad again (Prime splices ads into the video, so it does), and the room
+  // would wait on it again: the "ad loop". Returns that break (ms) so the caller holds there instead.
+  function passedBreak(target, here) {
+    const p = P();
+    const known = p && p.last && Array.isArray(p.last.breaks) ? p.last.breaks : [];
+    for (const b of known) if (target < b && b <= here && b - target <= REWATCH_MS) return b;
+    return null;
+  }
+  // Wait at the break (paused) until the other side has played past it too; their next tick lets us go.
+  function holdAt(brk, here) {
+    const p = P();
+    if (p.playing()) p.pause();
+    if (Math.abs(here - brk) > TOL_MS) p.seek(brk + 500);
+    H.log('sync: holding past the break at', brk, 'instead of replaying its ad');
+  }
+
   // Guest: host heartbeat / requested sync. Drift correction.
   function applyHost(msg) {
     if (S.role !== 'guest') return; // the host is the clock; it never obeys ticks
-    setMemberAd(msg.from || 'Host', !!msg.ad, msg.adLeftMs, msg.ad ? msg.ms : null); // the host's own ad state rides on every tick
+    // The host's own ad state rides on every tick. An ad on another episode (host autoplayed ahead) is not ours to wait for.
+    setMemberAd(msg.from || 'Host', !!msg.ad && sameTitle(msg), msg.adLeftMs, msg.ad ? msg.ms : null);
     if (followHost(msg.url)) return;
     if (!sameTitle(msg)) return; // different show/episode: don't drag our playhead around
     const p = P();
     if (!ready() || localAd || waiting.length) return; // in an ad, or the room is waiting: the host's play resumes us
+    if (settledPlaying(p.last) == null) return; // mid-seek / buffering: our position isn't real yet (next tick re-checks)
     // Ticks (and syncs we asked for BEFORE the last action) may predate that action: skip them for a moment.
     // A sync we asked for after it (host-mode snap-back, ad end) is fresh: always apply.
     const asked = msg.type === 'sync' && syncAskedAt >= actionAt;
@@ -360,6 +387,8 @@
     const ms = num(msg.ms);
     if (ms == null) return;
     const target = Math.max(0, ms + (msg.playing && !msg.ad ? latency(msg) : 0));
+    const brk = passedBreak(target, p.ms());
+    if (brk != null) return holdAt(brk, p.ms());
     if (Math.abs(target - p.ms()) > TOL_MS) { H.log('sync: drift', Math.round(target - p.ms()), 'ms, seeking'); p.seek(target); }
     if (!!msg.playing !== p.playing()) { H.log('sync: host says', msg.type, msg.playing ? 'playing' : 'paused', 'at', ms, 'sentAt', msg.sentAt); if (msg.playing) p.play(); else p.pause(); }
   }
@@ -378,6 +407,10 @@
     // A deliberate seek is honored a bit more tightly than play/pause drift.
     const far = Math.abs(target - p.ms()) > (kind === 'seek' ? 1000 : TOL_MS);
     actionAt = now();
+    // A "play" (the room resuming after an ad) from just before a break we already passed: hold, don't rewatch.
+    // A person's deliberate seek back is still honored.
+    const brk = kind === 'play' && far ? passedBreak(target, p.ms()) : null;
+    if (brk != null) { holdAt(brk, p.ms()); return H.bus.emit('sync:event', { kind, by: msg.from || 'Someone', ms, time: ms / 1000 }); }
     H.log('sync: remote', kind, 'from', msg.from, 'ms', ms, 'far', far);
     if (kind === 'pause') {
       if (p.playing()) p.pause();
@@ -395,7 +428,7 @@
     switch (msg.type) {
       case 'play': case 'pause': case 'seek': return applyAction(msg);
       case 'sync': case 'tick': return applyHost(msg);
-      case 'ad': return setMemberAd(msg.from || 'Someone', !!msg.on, msg.leftMs, msg.ms);
+      case 'ad': return setMemberAd(msg.from || 'Someone', !!msg.on && sameTitle(msg), msg.leftMs, msg.ms);
       case 'sync-request': return sendSyncSoon(); // no-op unless we are the host
       case 'hello': return sendSyncSoon();        // a guest just (re)joined
       default:

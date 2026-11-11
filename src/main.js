@@ -5,7 +5,7 @@
   const STORE_KEY = 'hwp-session';
 
   HWP.session = {
-    save() { try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ role: HWP.state.role, code: HWP.state.code })); } catch (_) {} },
+    save() { try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ role: HWP.state.role, code: HWP.state.code, controlMode: HWP.state.controlMode })); } catch (_) {} },
     clear() { try { sessionStorage.removeItem(STORE_KEY); } catch (_) {} },
     load() { try { return JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null'); } catch (_) { return null; } },
   };
@@ -15,7 +15,10 @@
 
   const saved = HWP.session.load();
   if (saved && saved.code && saved.role) {
-    if (saved.role === 'host') HWP.net.host(saved.code);
+    if (saved.role === 'host') {
+      if (saved.controlMode === 'host') HWP.state.controlMode = 'host'; // "only the host controls" survives a reload
+      HWP.net.host(saved.code);
+    }
     else HWP.net.join(saved.code);
   }
 })();
