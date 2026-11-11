@@ -1,33 +1,50 @@
 #!/bin/bash
 # Watch Party one-line installer / updater (Mac). Paste into Terminal:
 #   curl -fsSL https://raw.githubusercontent.com/hcdonia/disney-watch-party/main/install.sh | bash
-# Finds the folder Chrome already loads the extension from (any profile), replaces its files with the latest
-# from GitHub, then restarts Chrome (chrome://restart reopens the tabs) so the new version is live.
+# Finds every copy of the extension on this Mac (Spotlight, else a scan of the home folder), replaces its files with the latest from GitHub, then restarts Chrome (chrome://restart reopens the tabs) so the new version is live.
 # Not installed yet: puts it in ~/Watch Party and opens chrome://extensions for the one-time Load unpacked.
-# Test knobs: HWP_DIR=<folder> forces the target, HWP_NO_RESTART=1 skips the Chrome restart.
+# Test knobs: HWP_DIR=<folder> forces the target, HWP_LIST=1 only lists targets, HWP_NO_RESTART=1 skips the restart.
 set -u
 REPO_ZIP="https://github.com/hcdonia/disney-watch-party/archive/refs/heads/main.zip"
-CHROME_DIR="$HOME/Library/Application Support/Google/Chrome"
 TMP=""
 cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
 trap cleanup EXIT
 fail() { echo; echo "Sorry, that did not work: $1"; exit 1; }
 
-# The extension folder Chrome has loaded: an unpacked path in a profile's preferences whose manifest is ours.
-find_dir() {
-  local prefs p
-  for prefs in "$CHROME_DIR"/*/"Secure Preferences" "$CHROME_DIR"/*/Preferences; do
-    [ -f "$prefs" ] || continue
-    while IFS= read -r p; do
-      [ -f "$p/manifest.json" ] && grep -q 'Watch Party' "$p/manifest.json" && { echo "$p"; return 0; }
-    done < <(grep -o '"path":"/[^"]*"' "$prefs" 2>/dev/null | sed 's/^"path":"//; s/"$//')
-  done
-  return 1
+# Every copy of the extension on this Mac, from the Spotlight index only. Reading Chrome's own profile files
+# makes macOS warn "Terminal would like to access data from other apps", so this never opens them.
+# A copy = a folder holding both sidepanel.js and peerjs.min.js. All copies get updated (Chrome loads one of them).
+find_dirs() {
+  local a b
+  a="$(mdfind 'kMDItemFSName == "sidepanel.js"' 2>/dev/null | sed 's|/[^/]*$||' | sort -u)"
+  b="$(mdfind 'kMDItemFSName == "peerjs.min.js"' 2>/dev/null | sed 's|/[^/]*$||' | sort -u)"
+  [ -n "$a" ] && [ -n "$b" ] || return 0
+  comm -12 <(echo "$a") <(echo "$b") | grep -vE '/\.Trash/|/node_modules/|^/private/|^/Volumes/|/Library/' | while IFS= read -r d; do
+    grep -q 'Watch Party' "$d/manifest.json" 2>/dev/null && echo "$d"   # only folders that really are this extension
+  done || true
 }
 
-DIR="${HWP_DIR:-$(find_dir)}"
+# Spotlight skips some folders (developer folders, excluded drives). Backup: look through the home folder a few
+# levels deep, skipping Library and hidden folders (macOS may ask once about Downloads/Documents/Desktop: Allow).
+scan_home() {
+  find "$HOME" -maxdepth 5 \( -name Library -o -name '.*' -o -name node_modules \) -prune -o -name sidepanel.js -print 2>/dev/null \
+    | sed 's|/[^/]*$||' | sort -u | while IFS= read -r d; do
+      [ -f "$d/peerjs.min.js" ] && grep -q 'Watch Party' "$d/manifest.json" 2>/dev/null && echo "$d"
+    done || true
+}
+
+DIRS=()
+if [ -n "${HWP_DIR:-}" ]; then DIRS=("$HWP_DIR")
+else
+  # A git checkout is a developer's working copy: never copy over it (git pull updates that one).
+  add() { while IFS= read -r d; do [ -n "$d" ] && [ ! -d "$d/.git" ] && DIRS+=("$d"); done; }
+  add < <(find_dirs)
+  if [ ${#DIRS[@]} -eq 0 ]; then add < <(scan_home); fi
+fi
 NEW=0
-if [ -z "$DIR" ]; then DIR="$HOME/Watch Party"; NEW=1; fi
+if [ ${#DIRS[@]} -eq 0 ]; then DIRS=("$HOME/Watch Party"); NEW=1; fi
+
+if [ -n "${HWP_LIST:-}" ]; then printf 'would update: %s\n' "${DIRS[@]}"; exit 0; fi
 
 echo "Getting the latest Watch Party..."
 TMP="$(mktemp -d)" || fail "could not make a temporary folder."
@@ -35,10 +52,12 @@ curl -fsSL "$REPO_ZIP" -o "$TMP/wp.zip" || fail "could not download it. Check yo
 unzip -q "$TMP/wp.zip" -d "$TMP/out" || fail "could not open the download."
 SRC="$TMP/out/disney-watch-party-main"
 [ -f "$SRC/manifest.json" ] || fail "the download looked wrong."
-mkdir -p "$DIR" || fail "could not make the folder $DIR."
-cp -R "$SRC/." "$DIR/" || fail "could not copy the new files into $DIR."
-VER=$(grep -m1 '"version"' "$DIR/manifest.json" | tr -dc '0-9.')
-echo "Updated to v$VER in: $DIR"
+echo "(If your Mac asks whether Terminal can access a folder like Downloads or Documents, click Allow.)"
+VER=$(grep -m1 '"version"' "$SRC/manifest.json" | tr -dc '0-9.')
+for DIR in "${DIRS[@]}"; do
+  mkdir -p "$DIR" && cp -R "$SRC/." "$DIR/" || fail "could not copy the new files into $DIR."
+  echo "Updated to v$VER in: $DIR"
+done
 
 if [ "$NEW" = 1 ]; then
   echo
