@@ -258,6 +258,14 @@ async function primeTimeline(browser) {
     await p.evaluate(() => HWP.player.seek(30000));
     await waitFor(async () => near(await pV(p), 46, 0.3), 3000);
     report('7.4 seek to program 30s lands at video 46s (jingle + ad added back)', near(await pV(p), 46, 0.3), `v=${(await pV(p)).toFixed(2)}`);
+    // Just past a break (where the room sits right after an ad): must land after the ad, never back inside it.
+    await p.evaluate(() => HWP.player.seek(15000));
+    await waitFor(async () => near(await pV(p), 31, 0.3) && !(await pLast(p)).ad, 3000); // the fake ad timer hides within 200ms
+    const l3 = await pLast(p);
+    report('7.4b seek to 1s past the break lands after the ad (video 31s), not in it', near(await pV(p), 31, 0.3) && !l3.ad, `v=${(await pV(p)).toFixed(2)} ad=${l3.ad}`);
+    await p.evaluate(() => HWP.player.seek(13000));
+    await waitFor(async () => near(await pV(p), 19, 0.3), 3000);
+    report('7.4c seek to 1s before the break lands before the ad (video 19s)', near(await pV(p), 19, 0.3), `v=${(await pV(p)).toFixed(2)}`);
   } finally { await p.close(); }
 }
 

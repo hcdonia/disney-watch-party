@@ -230,15 +230,19 @@
     if (!(off >= 0 && off <= MAX_OFFSET_S)) off = 0;
     return { offset: Math.min(off, ct), inAd: r.inAd, adLeft: r.adLeft };
   }
-  // Video time for program seconds p: solve ct = p + offset(ct). Monotone, so a few rounds settle it.
+  // Video time for program seconds p: the LAST video time whose program position is still <= p. Program
+  // time stands still during an ad, so a target at or just past a break has to come out after the whole
+  // ad. (Stepping ct = p + offset(ct) creeps through an ad one small step at a time and stops inside it:
+  // a sync right after an ad then seeked back into the ad, over and over.) Bisection, since program time
+  // never goes backwards as video time grows.
   function videoTimeFor(st, p) {
-    let ct = p + totalOffset(st, p).offset;
-    for (let i = 0; i < 8; i++) {
-      const next = p + totalOffset(st, ct).offset;
-      if (Math.abs(next - ct) < 0.01) break;
-      ct = next;
+    const program = (ct) => ct - totalOffset(st, ct).offset;
+    let lo = p, hi = p + MAX_OFFSET_S + 1;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (program(mid) <= p) lo = mid; else hi = mid;
     }
-    return ct;
+    return lo;
   }
 
   // ---------- on-screen ad timer ----------
